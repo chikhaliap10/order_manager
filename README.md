@@ -154,17 +154,59 @@ silently fail.
 
 ---
 
-## Part 7 — First run
+## Part 7 — Turn on the scheduled Google Sheets sync
+
+Instead of writing to Google Sheets on every single click (which used to
+make the app feel slower), the backup now runs on a schedule — once an
+hour by default — and copies your current orders, expenses, and
+withdrawals into the sheet in one batch.
+
+1. Back in Vercel, go to **Settings → Environment Variables** and add:
+   - `CRON_SECRET` — any random string you make up (this just confirms the
+     sync request really came from Vercel's scheduler, not a random visitor
+     to that URL). If you have a terminal handy, `openssl rand -hex 32`
+     generates a good one — otherwise just mash the keyboard for 20+
+     characters.
+2. Redeploy so the new variable takes effect.
+3. That's it — a file called `vercel.json` (already included in this
+   project) tells Vercel to call the sync automatically every hour. You can
+   see it running under **Vercel → your project → Cron Jobs** in the
+   sidebar, alongside a history of each run.
+
+**Want every 3 hours instead of every hour?** Open `vercel.json` and change
+`"0 * * * *"` to `"0 */3 * * *"`, then redeploy.
+
+**One thing worth knowing:** Vercel's plans have changed their Cron Jobs
+limits before (e.g. how often a free/Hobby plan can run one), so if the
+built-in cron doesn't fire as often as you'd like, check
+[vercel.com/docs/cron-jobs](https://vercel.com/docs/cron-jobs) for current
+limits on your plan. If your plan restricts the frequency, a free external
+scheduler works just as well and isn't tied to Vercel's plan tiers at all —
+services like [cron-job.org](https://cron-job.org) let you hit
+`https://your-site.vercel.app/api/sync-sheets` on whatever schedule you
+want; just add an `Authorization: Bearer YOUR_CRON_SECRET` header in their
+request settings so it passes the same check.
+
+**Testing it manually** any time: visiting
+`https://your-site.vercel.app/api/sync-sheets` yourself (with that same
+Authorization header, e.g. via a browser extension that adds headers, or a
+tool like Postman/Insomnia) triggers an immediate sync — handy right after
+setup to confirm it's working without waiting an hour.
+
+---
+
+## Part 8 — First run
 
 1. Open your live URL and type the passcode you chose as `APP_PASSCODE` in
    Part 5. Share that same passcode with your team directly (text,
    WhatsApp, etc.) — not written down anywhere public.
 2. Go to **Setup** and confirm your menu categories and partner names look
    right.
-3. Place a test order, then check your Google Sheet — a row should appear
-   in the **Orders** tab within a few seconds. If it doesn't show up, the
-   most common cause is the Share step in Part 3 being missed or the sheet
-   tab names not matching exactly (`Orders`, `Expenses`, `Withdrawals`).
+3. Place a test order, then trigger a manual sync (see Part 7) and check
+   your Google Sheet — it should appear in the **Orders** tab. If it
+   doesn't show up, visit `your-site.vercel.app/api/debug` — it tests each
+   tab individually and tells you exactly which one (if any) is
+   misconfigured or missing.
 
 ---
 
@@ -174,11 +216,13 @@ silently fail.
   logins) since that matches what you asked for. It's fine for an internal
   team tool but isn't bank-grade security — don't reuse this passcode
   anywhere sensitive.
-- The Google Sheet is a **backup log**, not the live app. The app always
-  reads and writes from its own database (Supabase) for speed; the sheet is
-  simply a running record of every action, so even a deleted order still
-  shows up as a "deleted" row in the sheet — nothing disappears from your
-  paper trail.
-- If the Google Sheets write ever fails (e.g. internet hiccup on Google's
-  end), the app keeps working normally — the backup step never blocks a
-  real action like saving an order.
+- The Google Sheet is a **periodic snapshot**, not the live app and not a
+  full event history. The app always reads and writes from its own
+  database (Supabase) for speed; on the schedule you set (hourly by
+  default), a separate job copies the current state of every order,
+  expense, and withdrawal into the sheet, replacing what was there before.
+  This means the sheet always reflects "as of the last sync," not
+  necessarily the current second.
+- If a scheduled sync ever fails (e.g. a Google API hiccup), the app itself
+  is completely unaffected — the next scheduled run tries again
+  automatically.

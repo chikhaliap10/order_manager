@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { testTabWrite } from "../../../lib/sheets";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +64,18 @@ export async function GET() {
   } catch (err) {
     report.error = err.message || String(err);
   }
+
+  // Test writing to each Google Sheets tab specifically. This tells us,
+  // in one visit, exactly which tab (if any) is broken -- e.g. a missing
+  // "Expenses" tab, a typo in the tab name, or a wrong GOOGLE_SHEET_ID.
+  report.sheets = {
+    GOOGLE_SHEET_ID_set: Boolean(process.env.GOOGLE_SHEET_ID),
+    GOOGLE_SERVICE_ACCOUNT_EMAIL_set: Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL),
+    GOOGLE_PRIVATE_KEY_set: Boolean(process.env.GOOGLE_PRIVATE_KEY),
+    Orders: await testTabWrite("Orders"),
+    Expenses: await testTabWrite("Expenses"),
+    Withdrawals: await testTabWrite("Withdrawals"),
+  };
 
   return Response.json(report, { headers: { "Content-Type": "application/json" } });
 }

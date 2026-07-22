@@ -1,5 +1,4 @@
 import { getKey, setKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
-import { upsertRow } from "../../../lib/sheets";
 import { isAuthed } from "../../../lib/auth";
 import { uid } from "../../../lib/defaults";
 
@@ -7,6 +6,10 @@ export const dynamic = "force-dynamic";
 
 const itemsSummary = (items) =>
   (items || []).map((i) => `${i.qty}x ${i.name}${i.variantLabel ? ` (${i.variantLabel})` : ""}`).join(", ");
+
+function badRequest(message) {
+  return Response.json({ error: message }, { status: 400 });
+}
 
 export async function POST(req) {
   try {
@@ -18,38 +21,21 @@ export async function POST(req) {
 
     // ---------- ORDERS ----------
     if (resource === "order") {
+      if (action === "create" || action === "update") {
+        if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
+        if (!Array.isArray(payload.items) || payload.items.length === 0) return badRequest("At least one item is required.");
+      }
+
       let orders = await getKey("orders", []);
 
       if (action === "create") {
         orders = [payload, ...orders];
-        await upsertRow("Orders", payload.id, [
-          new Date().toISOString(), "created", payload.id, payload.customer,
-          itemsSummary(payload.items), payload.total, payload.paid ? "paid" : "unpaid",
-        ]);
       } else if (action === "update") {
         orders = orders.map((o) => (o.id === payload.id ? payload : o));
-        await upsertRow("Orders", payload.id, [
-          new Date().toISOString(), "edited", payload.id, payload.customer,
-          itemsSummary(payload.items), payload.total, payload.paid ? "paid" : "unpaid",
-        ]);
       } else if (action === "toggle-paid") {
         orders = orders.map((o) => (o.id === payload.id ? { ...o, paid: !o.paid } : o));
-        const updated = orders.find((o) => o.id === payload.id);
-        if (updated) {
-          await upsertRow("Orders", updated.id, [
-            new Date().toISOString(), updated.paid ? "marked-paid" : "marked-unpaid", updated.id,
-            updated.customer, itemsSummary(updated.items), updated.total, updated.paid ? "paid" : "unpaid",
-          ]);
-        }
       } else if (action === "delete") {
-        const removed = orders.find((o) => o.id === payload.id);
         orders = orders.filter((o) => o.id !== payload.id);
-        if (removed) {
-          await upsertRow("Orders", removed.id, [
-            new Date().toISOString(), "deleted", removed.id, removed.customer,
-            itemsSummary(removed.items), removed.total, removed.paid ? "paid" : "unpaid",
-          ]);
-        }
       }
       await setKey("orders", orders);
       return Response.json({ orders });
@@ -57,17 +43,19 @@ export async function POST(req) {
 
     // ---------- EXPENSES ----------
     if (resource === "expense") {
+      if (action === "create" || action === "update") {
+        if (!payload?.category?.trim()) return badRequest("Category is required.");
+        if (!(Number(payload.amount) > 0)) return badRequest("Amount must be greater than 0.");
+      }
+
       let expenses = await getKey("expenses", []);
 
       if (action === "create") {
         expenses = [payload, ...expenses];
-        await upsertRow("Expenses", payload.id, [new Date().toISOString(), "created", payload.id, payload.category, payload.amount, payload.note || ""]);
+      } else if (action === "update") {
+        expenses = expenses.map((e) => (e.id === payload.id ? payload : e));
       } else if (action === "delete") {
-        const removed = expenses.find((e) => e.id === payload.id);
         expenses = expenses.filter((e) => e.id !== payload.id);
-        if (removed) {
-          await upsertRow("Expenses", removed.id, [new Date().toISOString(), "deleted", removed.id, removed.category, removed.amount, removed.note || ""]);
-        }
       }
       await setKey("expenses", expenses);
       return Response.json({ expenses });
@@ -75,19 +63,21 @@ export async function POST(req) {
 
     // ---------- WITHDRAWALS ----------
     if (resource === "withdrawal") {
+      if (action === "create" || action === "update") {
+        if (!payload?.partnerId) return badRequest("Partner is required.");
+        if (!(Number(payload.amount) > 0)) return badRequest("Amount must be greater than 0.");
+      }
+
       let withdrawals = await getKey("withdrawals", []);
       const partners = await getOrInitPartners();
       const partnerName = (id) => partners.find((p) => p.id === id)?.name || "Unknown";
 
       if (action === "create") {
         withdrawals = [payload, ...withdrawals];
-        await upsertRow("Withdrawals", payload.id, [new Date().toISOString(), "created", payload.id, partnerName(payload.partnerId), payload.amount, payload.note || ""]);
+      } else if (action === "update") {
+        withdrawals = withdrawals.map((w) => (w.id === payload.id ? payload : w));
       } else if (action === "delete") {
-        const removed = withdrawals.find((w) => w.id === payload.id);
         withdrawals = withdrawals.filter((w) => w.id !== payload.id);
-        if (removed) {
-          await upsertRow("Withdrawals", removed.id, [new Date().toISOString(), "deleted", removed.id, partnerName(removed.partnerId), removed.amount, removed.note || ""]);
-        }
       }
       await setKey("withdrawals", withdrawals);
       return Response.json({ withdrawals });
@@ -95,10 +85,18 @@ export async function POST(req) {
 
     // ---------- MENU ----------
     if (resource === "menu") {
+      if (action === "add-group" && !payload?.name?.trim()) return badRequest("Category name is required.");
+      if (action === "add-item") {
+        if (!payload?.item?.name?.trim()) return badRequest("Item name is required.");
+        if (!Array.isArray(payload.item.variants) || payload.item.variants.length === 0 || !payload.item.variants.some((v) => Number(v.price) > 0)) {
+          return badRequest("At least one price is required.");
+        }
+      }
+
       let menu = await getOrInitMenu();
 
       if (action === "add-group") {
-        menu = [...menu, { id: uid(), name: payload.name, items: [] }];
+        menu = [...menu, { id: uid(), name: payload.name.trim(), items: [] }];
       } else if (action === "remove-group") {
         menu = menu.filter((g) => g.id !== payload.groupId);
       } else if (action === "add-item") {
@@ -112,9 +110,11 @@ export async function POST(req) {
 
     // ---------- PARTNERS ----------
     if (resource === "partners") {
+      if (action === "rename" && !payload?.name?.trim()) return badRequest("Partner name cannot be empty.");
+
       let partners = await getOrInitPartners();
       if (action === "rename") {
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name } : p));
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name.trim() } : p));
       }
       await setKey("partners", partners);
       return Response.json({ partners });

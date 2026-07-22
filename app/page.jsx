@@ -38,6 +38,11 @@ async function api(path, opts) {
 
 function ConfirmDelete({ onConfirm, label }) {
   const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const doConfirm = async () => {
+    setBusy(true);
+    try { await onConfirm(); } finally { setBusy(false); setConfirming(false); }
+  };
   if (!confirming) {
     return (
       <button onClick={() => setConfirming(true)} style={iconBtn} className="om-btn" aria-label={`Delete ${label}`}>
@@ -47,10 +52,17 @@ function ConfirmDelete({ onConfirm, label }) {
   }
   return (
     <div style={{ display: "flex", gap: 4 }}>
-      <button onClick={() => { onConfirm(); setConfirming(false); }} style={{ ...iconBtn, background: C.dangerTint, color: C.danger, borderColor: C.danger }} className="om-btn" aria-label="Confirm delete"><Check size={14} /></button>
-      <button onClick={() => setConfirming(false)} style={iconBtn} className="om-btn" aria-label="Cancel delete"><X size={14} /></button>
+      <button onClick={doConfirm} disabled={busy} style={{ ...iconBtn, background: C.dangerTint, color: C.danger, borderColor: C.danger, opacity: busy ? 0.6 : 1 }} className="om-btn" aria-label="Confirm delete">
+        {busy ? <Loader2 className="om-spin" size={14} /> : <Check size={14} />}
+      </button>
+      <button onClick={() => setConfirming(false)} disabled={busy} style={iconBtn} className="om-btn" aria-label="Cancel delete"><X size={14} /></button>
     </div>
   );
+}
+
+function ErrorText({ children }) {
+  if (!children) return null;
+  return <div style={{ color: C.danger, fontSize: 13, marginTop: 8, lineHeight: 1.4 }}>{children}</div>;
 }
 
 function exportBackup(data) {
@@ -72,6 +84,7 @@ export default function HomePage() {
   const [unlocked, setUnlocked] = useState(false);
   const [passInput, setPassInput] = useState("");
   const [passError, setPassError] = useState("");
+  const [unlocking, setUnlocking] = useState(false);
 
   const [menu, setMenu] = useState([]);
   const [partners, setPartners] = useState([]);
@@ -101,6 +114,7 @@ export default function HomePage() {
 
   const handleUnlock = async () => {
     if (!passInput.trim()) { setPassError("Enter the passcode"); return; }
+    setUnlocking(true);
     try {
       const res = await api("/api/unlock", { method: "POST", body: { passcode: passInput.trim() } });
       if (res.error) { setPassError(res.error); return; }
@@ -108,12 +122,31 @@ export default function HomePage() {
       await refresh();
     } catch (err) {
       setPassError(err.message || "Something went wrong — try again.");
+    } finally {
+      setUnlocking(false);
     }
   };
 
+  // Returns {ok:true} on success or {ok:false, error} on failure, so every
+  // form can show its own specific error and manage its own loading state
+  // instead of failing silently.
   const act = async (resource, action, payload) => {
-    await api("/api/actions", { method: "POST", body: { resource, action, payload } });
-    await refresh();
+    try {
+      const res = await api("/api/actions", { method: "POST", body: { resource, action, payload } });
+      if (res.error) return { ok: false, error: res.error };
+      // The action endpoint already returns exactly the resource that
+      // changed (orders, expenses, withdrawals, menu, or partners) — apply
+      // that directly instead of re-fetching the entire app's data again.
+      // This cuts a full extra round-trip out of every single click.
+      if (res.orders) setOrders(res.orders);
+      if (res.expenses) setExpenses(res.expenses);
+      if (res.withdrawals) setWithdrawals(res.withdrawals);
+      if (res.menu) setMenu(res.menu);
+      if (res.partners) setPartners(res.partners);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message || "Something went wrong. Please try again." };
+    }
   };
 
   const totals = useMemo(() => {
@@ -137,6 +170,7 @@ export default function HomePage() {
       @keyframes omSpin{to{transform:rotate(360deg)}}
       .om-input:focus{outline:none;border-color:${C.ember} !important;box-shadow:0 0 0 3px ${C.emberTint}}
       .om-btn:hover{filter:brightness(0.96)}
+      .om-btn:disabled{cursor:not-allowed}
       *{font-family:'Inter',sans-serif;box-sizing:border-box}
     `}</style>
   );
@@ -179,8 +213,10 @@ export default function HomePage() {
           <label style={fieldLabel}>Passcode</label>
           <input type="password" value={passInput} onChange={(e) => { setPassInput(e.target.value); setPassError(""); }}
             onKeyDown={(e) => e.key === "Enter" && handleUnlock()} placeholder="••••" style={input} className="om-input" autoFocus />
-          {passError && <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{passError}</div>}
-          <button onClick={handleUnlock} style={primaryBtn} className="om-btn"><Lock size={15} /> Unlock</button>
+          <ErrorText>{passError}</ErrorText>
+          <button onClick={handleUnlock} disabled={unlocking} style={{ ...primaryBtn, opacity: unlocking ? 0.7 : 1 }} className="om-btn">
+            {unlocking ? <Loader2 className="om-spin" size={15} /> : <Lock size={15} />} {unlocking ? "Checking..." : "Unlock"}
+          </button>
         </div>
       </div>
     );
@@ -229,11 +265,13 @@ export default function HomePage() {
         {tab === "expenses" && (
           <ExpensesTab expenses={expenses}
             onCreate={(e) => act("expense", "create", e)}
+            onUpdate={(e) => act("expense", "update", e)}
             onDelete={(id) => act("expense", "delete", { id })} />
         )}
         {tab === "partners" && (
           <PartnersTab partners={partners} totals={totals} withdrawals={withdrawals}
             onCreate={(w) => act("withdrawal", "create", w)}
+            onUpdate={(w) => act("withdrawal", "update", w)}
             onDelete={(id) => act("withdrawal", "delete", { id })} />
         )}
         {tab === "settings" && (
@@ -344,6 +382,8 @@ function firstItem(group) { return group?.items?.[0]; }
 
 function NewOrderTab({ menu, onCreate }) {
   const [customer, setCustomer] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const makeLine = () => {
     const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
     return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 };
@@ -358,16 +398,20 @@ function NewOrderTab({ menu, onCreate }) {
   const lineTotal = (l) => (getVariant(l)?.price || 0) * (Number(l.qty) || 0);
   const orderTotal = lines.reduce((s, l) => s + lineTotal(l), 0);
 
-  const submit = () => {
-    if (!customer.trim() || menu.length === 0) return;
+  const submit = async () => {
+    if (!customer.trim()) { setError("Customer name is required."); return; }
     const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
       const it = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
       const v = getVariant(l);
       return { name: it?.name || "Item", variantLabel: v?.label || "", price: v?.price || 0, qty: Number(l.qty) };
     });
-    if (items.length === 0) return;
+    if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
+    setError("");
+    setSubmitting(true);
     const total = items.reduce((s, i) => s + i.price * i.qty, 0);
-    onCreate({ id: uid(), customer: customer.trim(), items, total, paid: false, ts: Date.now() });
+    const res = await onCreate({ id: uid(), customer: customer.trim(), items, total, paid: false, ts: Date.now() });
+    setSubmitting(false);
+    if (!res.ok) { setError(res.error); return; }
     setCustomer(""); setLines([makeLine()]);
   };
 
@@ -380,19 +424,22 @@ function NewOrderTab({ menu, onCreate }) {
         ) : (
           <>
             <label style={fieldLabel}>Customer name</label>
-            <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => setCustomer(e.target.value)} />
+            <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
             <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
               {lines.map((l) => (
                 <OrderLineRow key={l.id} line={l} menu={menu} onChange={updateLine} onRemove={() => removeLine(l.id)} removable={lines.length > 1} />
               ))}
             </div>
             <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
+            <ErrorText>{error}</ErrorText>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
               <div>
                 <div style={fieldLabel}>Order total</div>
                 <div style={{ ...displayNum, fontSize: 22, color: C.moss }}>{money(orderTotal)}</div>
               </div>
-              <button onClick={submit} style={{ ...primaryBtn, width: "auto", marginTop: 0 }} className="om-btn"><Plus size={15} /> Save order</button>
+              <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+                {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Save order"}
+              </button>
             </div>
           </>
         )}
@@ -418,6 +465,8 @@ function orderToLines(order, menu) {
 function OrderEditForm({ order, menu, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
   const [lines, setLines] = useState(orderToLines(order, menu));
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
   const lineTotal = (l) => (getVariant(l)?.price || 0) * (Number(l.qty) || 0);
   const total = lines.reduce((s, l) => s + lineTotal(l), 0);
@@ -427,36 +476,43 @@ function OrderEditForm({ order, menu, onSave, onCancel }) {
     const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
   };
-  const save = () => {
-    if (!customer.trim()) return;
+  const save = async () => {
+    if (!customer.trim()) { setError("Customer name is required."); return; }
     const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
       const item = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
       const v = getVariant(l);
       return { name: item?.name || "Item", variantLabel: v?.label || "", price: v?.price || 0, qty: Number(l.qty) };
     });
-    if (items.length === 0) return;
-    onSave({ ...order, customer: customer.trim(), items, total: items.reduce((s, i) => s + i.price * i.qty, 0) });
+    if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onSave({ ...order, customer: customer.trim(), items, total: items.reduce((s, i) => s + i.price * i.qty, 0) });
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
   };
 
   return (
     <div style={{ ...card, borderColor: C.ember }}>
       <div style={cardTitle}>Editing order</div>
       <label style={fieldLabel}>Customer name</label>
-      <input className="om-input" style={input} value={customer} onChange={(e) => setCustomer(e.target.value)} />
+      <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
       <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         {lines.map((l) => (
           <OrderLineRow key={l.id} line={l} menu={menu} onChange={updateLine} onRemove={() => removeLine(l.id)} removable={lines.length > 1} />
         ))}
       </div>
       <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
+      <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
         <div>
           <div style={fieldLabel}>New total</div>
           <div style={{ ...displayNum, fontSize: 22, color: C.moss }}>{money(total)}</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={onCancel} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
-          <button onClick={save} style={{ ...primaryBtn, width: "auto", marginTop: 0 }} className="om-btn"><Check size={15} /> Save changes</button>
+          <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+          <button onClick={save} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+            {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Save changes"}
+          </button>
         </div>
       </div>
     </div>
@@ -465,6 +521,14 @@ function OrderEditForm({ order, menu, onSave, onCancel }) {
 
 function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
   const [editingId, setEditingId] = useState(null);
+  const [togglingId, setTogglingId] = useState(null);
+
+  const handleToggle = async (id) => {
+    setTogglingId(id);
+    await onTogglePaid(id);
+    setTogglingId(null);
+  };
+
   return (
     <div>
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and logged to Google Sheets as a backup — nothing is lost.</div>
@@ -476,7 +540,7 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
           {orders.map((o) =>
             editingId === o.id ? (
               <OrderEditForm key={o.id} order={o} menu={menu}
-                onSave={(updated) => { onUpdate(updated); setEditingId(null); }}
+                onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
@@ -487,9 +551,9 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
                   </div>
                 </div>
                 <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(o.total)}</div>
-                <button onClick={() => onTogglePaid(o.id)} className="om-btn"
-                  style={{ ...pill, background: o.paid ? C.successTint : C.warningTint, color: o.paid ? C.success : C.warning }}>
-                  {o.paid ? <Check size={13} /> : null} {o.paid ? "Paid" : "Unpaid"}
+                <button onClick={() => handleToggle(o.id)} disabled={togglingId === o.id} className="om-btn"
+                  style={{ ...pill, background: o.paid ? C.successTint : C.warningTint, color: o.paid ? C.success : C.warning, opacity: togglingId === o.id ? 0.6 : 1 }}>
+                  {togglingId === o.id ? <Loader2 className="om-spin" size={13} /> : (o.paid ? <Check size={13} /> : null)} {o.paid ? "Paid" : "Unpaid"}
                 </button>
                 <button onClick={() => setEditingId(o.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit order"><Pencil size={14} /></button>
                 <ConfirmDelete label="order" onConfirm={() => onDelete(o.id)} />
@@ -502,15 +566,70 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
   );
 }
 
-function ExpensesTab({ expenses, onCreate, onDelete }) {
+function ExpenseEditForm({ expense, onSave, onCancel }) {
+  const [category, setCategory] = useState(expense.category);
+  const [amount, setAmount] = useState(String(expense.amount));
+  const [note, setNote] = useState(expense.note || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const save = async () => {
+    if (!category.trim()) { setError("Category is required."); return; }
+    if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onSave({ ...expense, category, amount: Number(amount), note });
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
+  };
+
+  return (
+    <div style={{ ...card, borderColor: C.ember }}>
+      <div style={cardTitle}>Editing expense</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 140 }}>
+          <label style={fieldLabel}>Category</label>
+          <select className="om-input" style={input} value={category} onChange={(e) => { setCategory(e.target.value); setError(""); }}>
+            {["Ingredients", "Rent", "Staff", "Gas/fuel", "Packaging", "Misc"].map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div style={{ width: 130 }}>
+          <label style={fieldLabel}>Amount</label>
+          <input type="number" step="0.01" min="0.01" className="om-input" style={input} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+        </div>
+      </div>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
+      <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={save} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Save changes"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Ingredients");
   const [note, setNote] = useState("");
-  const submit = () => {
-    if (!amount || Number(amount) <= 0) return;
-    onCreate({ id: uid(), amount: Number(amount), category, note, ts: Date.now() });
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+
+  const submit = async () => {
+    if (!category.trim()) { setError("Category is required."); return; }
+    if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, ts: Date.now() });
+    setSubmitting(false);
+    if (!res.ok) { setError(res.error); return; }
     setAmount(""); setNote("");
   };
+
   return (
     <div>
       <div style={card}>
@@ -518,50 +637,115 @@ function ExpensesTab({ expenses, onCreate, onDelete }) {
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}>
             <label style={fieldLabel}>Category</label>
-            <select className="om-input" style={input} value={category} onChange={(e) => setCategory(e.target.value)}>
+            <select className="om-input" style={input} value={category} onChange={(e) => { setCategory(e.target.value); setError(""); }}>
               {["Ingredients", "Rent", "Staff", "Gas/fuel", "Packaging", "Misc"].map((c) => <option key={c}>{c}</option>)}
             </select>
           </div>
           <div style={{ width: 130 }}>
             <label style={fieldLabel}>Amount</label>
-            <input type="number" step="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input type="number" step="0.01" min="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
           </div>
         </div>
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Sunday market veggie run" value={note} onChange={(e) => setNote(e.target.value)} />
-        <button onClick={submit} style={primaryBtn} className="om-btn"><Plus size={15} /> Add expense</button>
+        <ErrorText>{error}</ErrorText>
+        <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Add expense"}
+        </button>
       </div>
       <div style={{ ...sectionTitle, marginTop: 26 }}>All expenses</div>
       {expenses.length === 0 ? (
         <div style={emptyState}>No expenses logged yet.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {expenses.map((e) => (
-            <div key={e.id} style={{ ...rowCard, borderLeft: `3px solid ${C.danger}` }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 15 }}>{e.category}</div>
-                {e.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{e.note}</div>}
+          {expenses.map((e) =>
+            editingId === e.id ? (
+              <ExpenseEditForm key={e.id} expense={e}
+                onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
+                onCancel={() => setEditingId(null)} />
+            ) : (
+              <div key={e.id} style={{ ...rowCard, borderLeft: `3px solid ${C.danger}` }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>{e.category}</div>
+                  {e.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{e.note}</div>}
+                </div>
+                <div style={{ ...displayNum, fontSize: 15, marginRight: 14, color: C.danger }}>-{money(e.amount)}</div>
+                <button onClick={() => setEditingId(e.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit expense"><Pencil size={14} /></button>
+                <ConfirmDelete label="expense" onConfirm={() => onDelete(e.id)} />
               </div>
-              <div style={{ ...displayNum, fontSize: 15, marginRight: 14, color: C.danger }}>-{money(e.amount)}</div>
-              <ConfirmDelete label="expense" onConfirm={() => onDelete(e.id)} />
-            </div>
-          ))}
+            )
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onDelete }) {
+function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
+  const [partnerId, setPartnerId] = useState(withdrawal.partnerId);
+  const [amount, setAmount] = useState(String(withdrawal.amount));
+  const [note, setNote] = useState(withdrawal.note || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const save = async () => {
+    if (!partnerId) { setError("Partner is required."); return; }
+    if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onSave({ ...withdrawal, partnerId, amount: Number(amount), note });
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
+  };
+
+  return (
+    <div style={{ ...card, borderColor: C.ember }}>
+      <div style={cardTitle}>Editing withdrawal</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 140 }}>
+          <label style={fieldLabel}>Partner</label>
+          <select className="om-input" style={input} value={partnerId} onChange={(e) => { setPartnerId(e.target.value); setError(""); }}>
+            {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+        <div style={{ width: 130 }}>
+          <label style={fieldLabel}>Amount</label>
+          <input type="number" step="0.01" min="0.01" className="om-input" style={input} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+        </div>
+      </div>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
+      <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={save} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Save changes"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [editingId, setEditingId] = useState(null);
   useEffect(() => { if (!partnerId && partners[0]) setPartnerId(partners[0].id); }, [partners]);
-  const submit = () => {
-    if (!partnerId || !amount || Number(amount) <= 0) return;
-    onCreate({ id: uid(), partnerId, amount: Number(amount), note, ts: Date.now() });
+
+  const submit = async () => {
+    if (!partnerId) { setError("Partner is required."); return; }
+    if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onCreate({ id: uid(), partnerId, amount: Number(amount), note, ts: Date.now() });
+    setSubmitting(false);
+    if (!res.ok) { setError(res.error); return; }
     setAmount(""); setNote("");
   };
+
   return (
     <div>
       <div style={sectionTitle}>Live balance per partner</div>
@@ -582,39 +766,51 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onDelete }) {
           );
         })}
       </div>
+
       <div style={card}>
         <div style={cardTitle}>Record a withdrawal</div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}>
             <label style={fieldLabel}>Partner</label>
-            <select className="om-input" style={input} value={partnerId} onChange={(e) => setPartnerId(e.target.value)}>
+            <select className="om-input" style={input} value={partnerId} onChange={(e) => { setPartnerId(e.target.value); setError(""); }}>
               {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </div>
           <div style={{ width: 130 }}>
             <label style={fieldLabel}>Amount</label>
-            <input type="number" step="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+            <input type="number" step="0.01" min="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
           </div>
         </div>
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Rent for June" value={note} onChange={(e) => setNote(e.target.value)} />
-        <button onClick={submit} style={primaryBtn} className="om-btn"><Plus size={15} /> Add withdrawal</button>
+        <ErrorText>{error}</ErrorText>
+        <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Add withdrawal"}
+        </button>
       </div>
+
       <div style={{ ...sectionTitle, marginTop: 26 }}>Withdrawal history</div>
       {withdrawals.length === 0 ? (
         <div style={emptyState}>No withdrawals yet.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {withdrawals.map((w) => (
-            <div key={w.id} style={{ ...rowCard, borderLeft: `3px solid ${C.ember}` }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontWeight: 600, fontSize: 15 }}>{partners.find((p) => p.id === w.partnerId)?.name || "Unknown"}</div>
-                {w.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{w.note}</div>}
+          {withdrawals.map((w) =>
+            editingId === w.id ? (
+              <WithdrawalEditForm key={w.id} withdrawal={w} partners={partners}
+                onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
+                onCancel={() => setEditingId(null)} />
+            ) : (
+              <div key={w.id} style={{ ...rowCard, borderLeft: `3px solid ${C.ember}` }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>{partners.find((p) => p.id === w.partnerId)?.name || "Unknown"}</div>
+                  {w.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{w.note}</div>}
+                </div>
+                <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(w.amount)}</div>
+                <button onClick={() => setEditingId(w.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit withdrawal"><Pencil size={14} /></button>
+                <ConfirmDelete label="withdrawal" onConfirm={() => onDelete(w.id)} />
               </div>
-              <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(w.amount)}</div>
-              <ConfirmDelete label="withdrawal" onConfirm={() => onDelete(w.id)} />
-            </div>
-          ))}
+            )
+          )}
         </div>
       )}
     </div>
@@ -624,16 +820,24 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onDelete }) {
 function GroupCard({ group, onAddItem, onRemoveItem, onRemoveGroup }) {
   const [itemName, setItemName] = useState("");
   const [variantRows, setVariantRows] = useState([{ id: uid(), label: "", price: "" }]);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const addVariantRow = () => setVariantRows([...variantRows, { id: uid(), label: "", price: "" }]);
   const updateVariantRow = (id, patch) => setVariantRows(variantRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const removeVariantRow = (id) => setVariantRows(variantRows.filter((r) => r.id !== id));
-  const submitItem = () => {
-    if (!itemName.trim()) return;
+
+  const submitItem = async () => {
+    if (!itemName.trim()) { setError("Item name is required."); return; }
     const variants = variantRows.filter((r) => r.price !== "" && Number(r.price) > 0).map((r) => ({ id: uid(), label: r.label.trim(), price: Number(r.price) }));
-    if (variants.length === 0) return;
-    onAddItem({ id: uid(), name: itemName.trim(), variants });
+    if (variants.length === 0) { setError("At least one price is required."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onAddItem({ id: uid(), name: itemName.trim(), variants });
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); return; }
     setItemName(""); setVariantRows([{ id: uid(), label: "", price: "" }]);
   };
+
   return (
     <div style={lineBox}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -653,25 +857,81 @@ function GroupCard({ group, onAddItem, onRemoveItem, onRemoveGroup }) {
       </div>
       <div style={{ borderTop: `1px dashed ${C.border}`, paddingTop: 12 }}>
         <label style={fieldLabel}>New item name</label>
-        <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => setItemName(e.target.value)} />
+        <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => { setItemName(e.target.value); setError(""); }} />
         <label style={{ ...fieldLabel, marginTop: 10 }}>Price options</label>
         {variantRows.map((r) => (
           <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
             <input className="om-input" style={{ ...input, flex: 1 }} placeholder="Style name (optional, e.g. Regular)" value={r.label} onChange={(e) => updateVariantRow(r.id, { label: e.target.value })} />
-            <input type="number" step="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => updateVariantRow(r.id, { price: e.target.value })} />
+            <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => { updateVariantRow(r.id, { price: e.target.value }); setError(""); }} />
             {variantRows.length > 1 && (<button onClick={() => removeVariantRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove price option"><X size={14} /></button>)}
           </div>
         ))}
         <button onClick={addVariantRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another price option</button>
-        <button onClick={submitItem} style={{ ...primaryBtn, marginTop: 12 }} className="om-btn"><Plus size={14} /> Add item to {group.name}</button>
+        <ErrorText>{error}</ErrorText>
+        <button onClick={submitItem} disabled={submitting} style={{ ...primaryBtn, marginTop: 12, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={14} /> : <Plus size={14} />} {submitting ? "Adding..." : `Add item to ${group.name}`}
+        </button>
       </div>
+    </div>
+  );
+}
+
+function PartnerNameInput({ partner, index, onRenamePartner }) {
+  // Local state decoupled from the server so typing doesn't fire a save on
+  // every keystroke, and an in-progress empty field never gets persisted.
+  const [value, setValue] = useState(partner.name);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { setValue(partner.name); }, [partner.name]);
+
+  const commit = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setError("Partner name cannot be empty.");
+      setValue(partner.name); // revert to the last saved value
+      return;
+    }
+    if (trimmed === partner.name) return;
+    setError("");
+    setSaving(true);
+    const res = await onRenamePartner(partner.id, trimmed);
+    setSaving(false);
+    if (res && !res.ok) { setError(res.error); setValue(partner.name); }
+  };
+
+  return (
+    <div>
+      <label style={fieldLabel}>Partner {index + 1}</label>
+      <div style={{ position: "relative" }}>
+        <input
+          className="om-input" style={input} value={value}
+          onChange={(e) => { setValue(e.target.value); setError(""); }}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+        />
+        {saving && <Loader2 className="om-spin" size={14} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", color: C.muted }} />}
+      </div>
+      <ErrorText>{error}</ErrorText>
     </div>
   );
 }
 
 function SettingsTab({ menu, partners, backupData, onAddGroup, onRemoveGroup, onAddItem, onRemoveItem, onRenamePartner }) {
   const [groupName, setGroupName] = useState("");
-  const addGroup = () => { if (!groupName.trim()) return; onAddGroup(groupName.trim()); setGroupName(""); };
+  const [groupError, setGroupError] = useState("");
+  const [addingGroup, setAddingGroup] = useState(false);
+
+  const addGroup = async () => {
+    if (!groupName.trim()) { setGroupError("Category name is required."); return; }
+    setGroupError("");
+    setAddingGroup(true);
+    const res = await onAddGroup(groupName.trim());
+    setAddingGroup(false);
+    if (res && !res.ok) { setGroupError(res.error); return; }
+    setGroupName("");
+  };
+
   return (
     <div>
       <div style={{ ...card, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
@@ -693,18 +953,18 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRemoveGroup, on
       <div style={{ ...card, marginTop: 14 }}>
         <label style={fieldLabel}>New category name</label>
         <div style={{ display: "flex", gap: 8 }}>
-          <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. Surti Aloopuri" value={groupName} onChange={(e) => setGroupName(e.target.value)} />
-          <button onClick={addGroup} style={{ ...iconBtn, height: 38 }} className="om-btn" aria-label="Add category"><Plus size={16} /></button>
+          <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. Surti Aloopuri" value={groupName} onChange={(e) => { setGroupName(e.target.value); setGroupError(""); }} />
+          <button onClick={addGroup} disabled={addingGroup} style={{ ...iconBtn, height: 38, opacity: addingGroup ? 0.7 : 1 }} className="om-btn" aria-label="Add category">
+            {addingGroup ? <Loader2 className="om-spin" size={16} /> : <Plus size={16} />}
+          </button>
         </div>
+        <ErrorText>{groupError}</ErrorText>
       </div>
       <div style={{ ...card, marginTop: 20 }}>
         <div style={cardTitle}>Partner names</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {partners.map((p, i) => (
-            <div key={p.id}>
-              <label style={fieldLabel}>Partner {i + 1}</label>
-              <input className="om-input" style={input} value={p.name} onChange={(e) => onRenamePartner(p.id, e.target.value)} />
-            </div>
+            <PartnerNameInput key={p.id} partner={p} index={i} onRenamePartner={onRenamePartner} />
           ))}
         </div>
       </div>
