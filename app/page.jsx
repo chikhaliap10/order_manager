@@ -23,7 +23,17 @@ async function api(path, opts) {
     body: opts?.body ? JSON.stringify(opts.body) : undefined,
     credentials: "include",
   });
-  return res.json();
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Server returned a non-JSON response (status ${res.status}). Check your Vercel function logs.`);
+  }
+  if (!res.ok && !data.error) {
+    throw new Error(`Request failed with status ${res.status}`);
+  }
+  return data;
 }
 
 function ConfirmDelete({ onConfirm, label }) {
@@ -58,6 +68,7 @@ function exportBackup(data) {
 
 export default function HomePage() {
   const [ready, setReady] = useState(false);
+  const [loadError, setLoadError] = useState(null);
   const [unlocked, setUnlocked] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
   const [passInput, setPassInput] = useState("");
@@ -71,14 +82,19 @@ export default function HomePage() {
   const [tab, setTab] = useState("orders");
 
   const refresh = async () => {
-    const data = await api("/api/state");
-    if (data.authed) {
-      setUnlocked(true);
-      setMenu(data.menu); setPartners(data.partners); setOrders(data.orders);
-      setExpenses(data.expenses); setWithdrawals(data.withdrawals);
-    } else {
-      setUnlocked(false);
-      setNeedsSetup(data.needsSetup);
+    try {
+      setLoadError(null);
+      const data = await api("/api/state");
+      if (data.authed) {
+        setUnlocked(true);
+        setMenu(data.menu); setPartners(data.partners); setOrders(data.orders);
+        setExpenses(data.expenses); setWithdrawals(data.withdrawals);
+      } else {
+        setUnlocked(false);
+        setNeedsSetup(data.needsSetup);
+      }
+    } catch (err) {
+      setLoadError(err.message || "Something went wrong loading the app.");
     }
     setReady(true);
   };
@@ -87,10 +103,14 @@ export default function HomePage() {
 
   const handleUnlock = async () => {
     if (passInput.trim().length < 4) { setPassError("Pick a passcode of at least 4 characters"); return; }
-    const res = await api("/api/unlock", { method: "POST", body: { passcode: passInput.trim() } });
-    if (res.error) { setPassError(res.error); return; }
-    setPassError("");
-    await refresh();
+    try {
+      const res = await api("/api/unlock", { method: "POST", body: { passcode: passInput.trim() } });
+      if (res.error) { setPassError(res.error); return; }
+      setPassError("");
+      await refresh();
+    } catch (err) {
+      setPassError(err.message || "Something went wrong — try again.");
+    }
   };
 
   const act = async (resource, action, payload) => {
@@ -127,6 +147,24 @@ export default function HomePage() {
     return (
       <div style={wrap}><GlobalStyle />
         <div style={{ display: "flex", justifyContent: "center", padding: "5rem 0", color: C.muted }}><Loader2 className="om-spin" size={24} /></div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div style={wrap}><GlobalStyle />
+        <div style={gateCard} className="om-fade">
+          <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 8, color: C.danger }}>Couldn't load the app</div>
+          <div style={{ fontSize: 14, color: C.muted, marginBottom: 16, lineHeight: 1.5 }}>{loadError}</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.5 }}>
+            This usually means the database isn't connected yet, or an environment variable is missing. Check{" "}
+            <strong>Vercel → your project → Settings → Environment Variables</strong> (are SUPABASE_URL and{" "}
+            SUPABASE_SERVICE_ROLE_KEY set?) and{" "}
+            <strong>Vercel → your project → Deployments → Functions/Logs</strong> for the exact error.
+          </div>
+          <button onClick={refresh} style={primaryBtn} className="om-btn">Try again</button>
+        </div>
       </div>
     );
   }

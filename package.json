@@ -12,7 +12,7 @@
     "react": "18.3.1",
     "react-dom": "18.3.1",
     "lucide-react": "0.383.0",
-    "@upstash/redis": "1.31.6",
+    "@supabase/supabase-js": "2.110.8",
     "googleapis": "140.0.1"
   }
 }

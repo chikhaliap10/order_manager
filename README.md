@@ -3,7 +3,7 @@
 This turns your order ledger into a real website anyone on your team can open
 from any phone or computer, with:
 
-- **Its own database** (Upstash Redis, connected through Vercel) — this is
+- **Its own database** (Supabase, a free Postgres database) — this is
   where the app actually reads and writes data, every time.
 - **A Google Sheet backup** — every order, expense, and withdrawal also gets
   logged as a row in a Google Sheet the moment it happens. If the app or
@@ -112,18 +112,38 @@ silently fail.
 3. Click **Deploy**. After a minute or two, you'll get a live URL like
    `order-ledger.vercel.app`.
 
-## Part 6 — Add the database (Upstash Redis)
+## Part 6 — Add the database (Supabase)
 
-1. In your Vercel project, go to the **Storage** tab.
-2. Click **Create Database** (or **Browse Marketplace**, depending on your
-   Vercel dashboard version) and choose **Upstash** → **Redis**.
-3. Follow its prompts to create a free database and connect it to this
-   project. Vercel automatically adds the right environment variables
-   (`KV_REST_API_URL` / `KV_REST_API_TOKEN` or similarly named ones) —
-   you don't need to copy these yourself.
-4. Go to **Deployments** and redeploy once (so the new environment
-   variables take effect) — Vercel usually prompts you to do this
-   automatically after adding storage.
+1. Go to [supabase.com](https://supabase.com) and sign up (or log in) — it's
+   free to start.
+2. Click **New Project**. Give it a name like `order-ledger`, set a database
+   password (Supabase will ask you to — just save it somewhere, you won't
+   need to type it again for this setup), and pick a region close to you.
+   Wait a minute or two while it provisions.
+3. Once it's ready, go to the **SQL Editor** in the left sidebar → **New
+   query**, paste in this, and click **Run**:
+   ```sql
+   create table if not exists kv_store (
+     key text primary key,
+     value jsonb not null
+   );
+   ```
+   This creates one simple table the app uses to store everything (menu,
+   orders, expenses, withdrawals, partners, and the shared passcode) as
+   labeled rows.
+4. Go to **Project Settings → API** (gear icon in the sidebar, then "API").
+   You need two values from this page:
+   - **Project URL** — looks like `https://abcdefgh.supabase.co`. This is
+     your `SUPABASE_URL`.
+   - **service_role secret key** — found under "Project API keys". Click
+     "Reveal" to see it. This is your `SUPABASE_SERVICE_ROLE_KEY`. Treat it
+     like a password — it has full access to your database.
+5. Back in your Vercel project, go to **Settings → Environment Variables**
+   and add both:
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY`
+6. Go to **Deployments** and redeploy your latest deployment so the new
+   environment variables take effect.
 
 ---
 
@@ -149,7 +169,7 @@ silently fail.
   team tool but isn't bank-grade security — don't reuse this passcode
   anywhere sensitive.
 - The Google Sheet is a **backup log**, not the live app. The app always
-  reads and writes from its own database (Redis) for speed; the sheet is
+  reads and writes from its own database (Supabase) for speed; the sheet is
   simply a running record of every action, so even a deleted order still
   shows up as a "deleted" row in the sheet — nothing disappears from your
   paper trail.
