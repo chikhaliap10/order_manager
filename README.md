@@ -105,6 +105,8 @@ silently fail.
 2. **Before clicking Deploy**, add these environment variables (there's a
    section for this on the same import screen, or under
    **Settings → Environment Variables** after deploying):
+   - `APP_PASSCODE` — pick any passcode you want your whole team to use to
+     open the app. This is the only place it's set.
    - `GOOGLE_SERVICE_ACCOUNT_EMAIL` — from Part 2
    - `GOOGLE_PRIVATE_KEY` — from Part 2 (paste the whole block, quotes and
      all, exactly as it appeared in the JSON file)
@@ -127,17 +129,22 @@ silently fail.
      key text primary key,
      value jsonb not null
    );
+   alter table kv_store disable row level security;
    ```
    This creates one simple table the app uses to store everything (menu,
-   orders, expenses, withdrawals, partners, and the shared passcode) as
-   labeled rows.
+   orders, expenses, withdrawals, partners) as labeled rows. Disabling RLS
+   is fine here since only your backend (using the service role key) ever
+   touches this table.
 4. Go to **Project Settings → API** (gear icon in the sidebar, then "API").
    You need two values from this page:
    - **Project URL** — looks like `https://abcdefgh.supabase.co`. This is
-     your `SUPABASE_URL`.
-   - **service_role secret key** — found under "Project API keys". Click
-     "Reveal" to see it. This is your `SUPABASE_SERVICE_ROLE_KEY`. Treat it
-     like a password — it has full access to your database.
+     your `SUPABASE_URL`. **Copy exactly this** — don't use the "API URL"
+     field if one is shown with `/rest/v1/` already added to the end; strip
+     that part off if it's there.
+   - **service_role secret key** (or, on newer Supabase projects, the
+     **secret key** under "Secret keys" — not the "publishable" one).
+     Click "Reveal" to see it. This is your `SUPABASE_SERVICE_ROLE_KEY`.
+     Treat it like a password — it has full access to your database.
 5. Back in your Vercel project, go to **Settings → Environment Variables**
    and add both:
    - `SUPABASE_URL`
@@ -149,10 +156,9 @@ silently fail.
 
 ## Part 7 — First run
 
-1. Open your live URL. You'll be asked to set a shared passcode — this is
-   the one thing everyone on your team will type in to use the app. Pick
-   something simple but not guessable, and share it with your team directly
-   (text, WhatsApp, etc.) — not written down anywhere public.
+1. Open your live URL and type the passcode you chose as `APP_PASSCODE` in
+   Part 5. Share that same passcode with your team directly (text,
+   WhatsApp, etc.) — not written down anywhere public.
 2. Go to **Setup** and confirm your menu categories and partner names look
    right.
 3. Place a test order, then check your Google Sheet — a row should appear

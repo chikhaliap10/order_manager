@@ -70,7 +70,6 @@ export default function HomePage() {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [unlocked, setUnlocked] = useState(false);
-  const [needsSetup, setNeedsSetup] = useState(false);
   const [passInput, setPassInput] = useState("");
   const [passError, setPassError] = useState("");
 
@@ -91,7 +90,6 @@ export default function HomePage() {
         setExpenses(data.expenses); setWithdrawals(data.withdrawals);
       } else {
         setUnlocked(false);
-        setNeedsSetup(data.needsSetup);
       }
     } catch (err) {
       setLoadError(err.message || "Something went wrong loading the app.");
@@ -102,7 +100,7 @@ export default function HomePage() {
   useEffect(() => { refresh(); }, []);
 
   const handleUnlock = async () => {
-    if (passInput.trim().length < 4) { setPassError("Pick a passcode of at least 4 characters"); return; }
+    if (!passInput.trim()) { setPassError("Enter the passcode"); return; }
     try {
       const res = await api("/api/unlock", { method: "POST", body: { passcode: passInput.trim() } });
       if (res.error) { setPassError(res.error); return; }
@@ -176,13 +174,13 @@ export default function HomePage() {
           <div style={{ display: "flex", justifyContent: "center", marginBottom: 14 }}><div style={badge}><ChefHat size={22} /></div></div>
           <h2 style={displayH1}>Order ledger</h2>
           <p style={{ textAlign: "center", color: C.muted, margin: "6px 0 22px", fontSize: 14, lineHeight: 1.5 }}>
-            {needsSetup ? "Set a shared passcode — everyone on the team will use this one." : "Enter the shared passcode to continue."}
+            Enter the shared passcode to continue.
           </p>
           <label style={fieldLabel}>Passcode</label>
           <input type="password" value={passInput} onChange={(e) => { setPassInput(e.target.value); setPassError(""); }}
             onKeyDown={(e) => e.key === "Enter" && handleUnlock()} placeholder="••••" style={input} className="om-input" autoFocus />
           {passError && <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{passError}</div>}
-          <button onClick={handleUnlock} style={primaryBtn} className="om-btn"><Lock size={15} /> {needsSetup ? "Save passcode" : "Unlock"}</button>
+          <button onClick={handleUnlock} style={primaryBtn} className="om-btn"><Lock size={15} /> Unlock</button>
         </div>
       </div>
     );

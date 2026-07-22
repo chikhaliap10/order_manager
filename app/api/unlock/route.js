@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { getKey, setKey } from "../../../lib/kv";
 import { SESSION_COOKIE } from "../../../lib/auth";
 
 export const dynamic = "force-dynamic";
@@ -13,52 +12,21 @@ export async function POST(req) {
   }
 
   const { passcode } = body || {};
-  if (!passcode || String(passcode).trim().length < 4) {
-    return NextResponse.json({ error: "Passcode must be at least 4 characters" }, { status: 400 });
+  const appPasscode = process.env.APP_PASSCODE;
+
+  if (!appPasscode) {
+    return NextResponse.json(
+      { error: "APP_PASSCODE is not set in this deployment's environment variables. Add it in Vercel Settings -> Environment Variables and redeploy." },
+      { status: 500 }
+    );
   }
 
-  const clean = String(passcode).trim();
-
-  let existing;
-  try {
-    existing = await getKey("settings:passcode", null);
-  } catch (err) {
-    return NextResponse.json({ error: err.message || "Database error" }, { status: 500 });
-  }
-
-  if (!existing) {
-    try {
-      await setKey("settings:passcode", clean);
-    } catch (err) {
-      return NextResponse.json({ error: err.message || "Database error" }, { status: 500 });
-    }
-    // Verify the write actually persisted. If Supabase silently didn't save
-    // it (e.g. a permissions/RLS issue even when using an admin-level key),
-    // this turns that into a clear, visible error instead of a silent loop
-    // back to the setup screen.
-    let verify;
-    try {
-      verify = await getKey("settings:passcode", null);
-    } catch (err) {
-      return NextResponse.json({ error: `Saved but could not verify: ${err.message}` }, { status: 500 });
-    }
-    if (verify !== clean) {
-      return NextResponse.json(
-        { error: "The passcode didn't save correctly. This usually means the kv_store table has Row Level Security enabled without a policy allowing the service role to write — check your Supabase table's RLS settings." },
-        { status: 500 }
-      );
-    }
-  } else if (existing !== clean) {
+  if (!passcode || String(passcode).trim() !== appPasscode) {
     return NextResponse.json({ error: "Wrong passcode" }, { status: 401 });
   }
 
-  // Use Next's official cookie API (NextResponse.cookies) rather than
-  // manually building a Set-Cookie header string — this is the
-  // Next.js-documented way to reliably set cookies from a Route Handler,
-  // and avoids edge cases where a hand-built header can silently fail
-  // to reach the browser depending on runtime/deployment specifics.
   const res = NextResponse.json({ ok: true });
-  res.cookies.set(SESSION_COOKIE, clean, {
+  res.cookies.set(SESSION_COOKIE, appPasscode, {
     httpOnly: true,
     path: "/",
     maxAge: 60 * 60 * 24 * 365,
