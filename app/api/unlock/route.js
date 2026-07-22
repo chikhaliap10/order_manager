@@ -32,6 +32,22 @@ export async function POST(req) {
     } catch (err) {
       return NextResponse.json({ error: err.message || "Database error" }, { status: 500 });
     }
+    // Verify the write actually persisted. If Supabase silently didn't save
+    // it (e.g. a permissions/RLS issue even when using an admin-level key),
+    // this turns that into a clear, visible error instead of a silent loop
+    // back to the setup screen.
+    let verify;
+    try {
+      verify = await getKey("settings:passcode", null);
+    } catch (err) {
+      return NextResponse.json({ error: `Saved but could not verify: ${err.message}` }, { status: 500 });
+    }
+    if (verify !== clean) {
+      return NextResponse.json(
+        { error: "The passcode didn't save correctly. This usually means the kv_store table has Row Level Security enabled without a policy allowing the service role to write — check your Supabase table's RLS settings." },
+        { status: 500 }
+      );
+    }
   } else if (existing !== clean) {
     return NextResponse.json({ error: "Wrong passcode" }, { status: 401 });
   }
