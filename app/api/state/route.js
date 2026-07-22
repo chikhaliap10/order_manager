@@ -1,6 +1,5 @@
-import { getKey } from "../../../lib/kv";
+import { getKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
-import { defaultMenu, defaultPartners } from "../../../lib/defaults";
 
 export const dynamic = "force-dynamic";
 
@@ -13,8 +12,8 @@ export async function GET() {
     }
 
     const [menu, partners, orders, expenses, withdrawals] = await Promise.all([
-      getKey("menu", defaultMenu()),
-      getKey("partners", defaultPartners()),
+      getOrInitMenu(),
+      getOrInitPartners(),
       getKey("orders", []),
       getKey("expenses", []),
       getKey("withdrawals", []),

@@ -1,4 +1,4 @@
-import { getKey, setKey } from "../../../lib/kv";
+import { getKey, setKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
 import { appendRow } from "../../../lib/sheets";
 import { isAuthed } from "../../../lib/auth";
 import { uid } from "../../../lib/defaults";
@@ -76,7 +76,7 @@ export async function POST(req) {
     // ---------- WITHDRAWALS ----------
     if (resource === "withdrawal") {
       let withdrawals = await getKey("withdrawals", []);
-      const partners = await getKey("partners", []);
+      const partners = await getOrInitPartners();
       const partnerName = (id) => partners.find((p) => p.id === id)?.name || "Unknown";
 
       if (action === "create") {
@@ -95,7 +95,7 @@ export async function POST(req) {
 
     // ---------- MENU ----------
     if (resource === "menu") {
-      let menu = await getKey("menu", []);
+      let menu = await getOrInitMenu();
 
       if (action === "add-group") {
         menu = [...menu, { id: uid(), name: payload.name, items: [] }];
@@ -112,7 +112,7 @@ export async function POST(req) {
 
     // ---------- PARTNERS ----------
     if (resource === "partners") {
-      let partners = await getKey("partners", []);
+      let partners = await getOrInitPartners();
       if (action === "rename") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name } : p));
       }
