@@ -93,10 +93,11 @@ export async function POST(req) {
 
     // ---------- MENU ----------
     if (resource === "menu") {
-      if (action === "add-group" && !payload?.name?.trim()) return badRequest("Category name is required.");
-      if (action === "add-item") {
-        if (!payload?.item?.name?.trim()) return badRequest("Item name is required.");
-        if (!Array.isArray(payload.item.variants) || payload.item.variants.length === 0 || !payload.item.variants.some((v) => Number(v.price) > 0)) {
+      if ((action === "add-group" || action === "rename-group") && !payload?.name?.trim()) return badRequest("Category name is required.");
+      if (action === "add-item" || action === "update-item") {
+        const item = action === "add-item" ? payload?.item : payload?.item;
+        if (!item?.name?.trim()) return badRequest("Item name is required.");
+        if (!Array.isArray(item.variants) || item.variants.length === 0 || !item.variants.some((v) => Number(v.price) > 0)) {
           return badRequest("At least one price is required.");
         }
       }
@@ -105,10 +106,14 @@ export async function POST(req) {
 
       if (action === "add-group") {
         menu = [...menu, { id: uid(), name: payload.name.trim(), items: [] }];
+      } else if (action === "rename-group") {
+        menu = menu.map((g) => (g.id === payload.groupId ? { ...g, name: payload.name.trim() } : g));
       } else if (action === "remove-group") {
         menu = menu.filter((g) => g.id !== payload.groupId);
       } else if (action === "add-item") {
         menu = menu.map((g) => (g.id === payload.groupId ? { ...g, items: [...g.items, payload.item] } : g));
+      } else if (action === "update-item") {
+        menu = menu.map((g) => (g.id === payload.groupId ? { ...g, items: g.items.map((i) => (i.id === payload.item.id ? payload.item : i)) } : g));
       } else if (action === "remove-item") {
         menu = menu.map((g) => (g.id === payload.groupId ? { ...g, items: g.items.filter((i) => i.id !== payload.itemId) } : g));
       }

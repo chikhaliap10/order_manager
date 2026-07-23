@@ -7,13 +7,13 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const QTY_PRESETS = [5, 10, 15, 20, 25];
 
 const C = {
-  ink: "#23291F", paper: "#FAF6EE", card: "#FFFFFF",
-  moss: "#2F4B3C", mossDark: "#1F3529", mossTint: "#E3EAE1",
-  ember: "#C9622B", emberTint: "#F6E4D6",
-  success: "#2F7D4F", successTint: "#E2F0E7",
-  danger: "#B3402E", dangerTint: "#FAE7E3",
-  warning: "#B8791E", warningTint: "#FAEDD9",
-  border: "#E8E1D2", muted: "#8A8570",
+  ink: "#F0EDE6", paper: "#121412", card: "#1C1F1B",
+  moss: "#43966B", mossDark: "#8FE0B3", mossTint: "rgba(67,150,107,0.18)",
+  ember: "#F0A868", emberTint: "rgba(240,168,104,0.16)",
+  success: "#6FCF97", successTint: "rgba(111,207,151,0.16)",
+  danger: "#F0796B", dangerTint: "rgba(240,121,107,0.16)",
+  warning: "#F0C24B", warningTint: "rgba(240,194,75,0.16)",
+  border: "#2C302A", muted: "#9BA39A",
 };
 
 async function api(path, opts) {
@@ -267,7 +267,7 @@ export default function HomePage() {
         )}
         {tab === "history" && (
           <OrderHistoryTab menu={menu} orders={orders} partners={partners}
-            onTogglePaid={(id, collectedBy) => act("order", "toggle-paid", { id, collectedBy })}
+            onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })} />
         )}
@@ -287,8 +287,10 @@ export default function HomePage() {
           <SettingsTab menu={menu} partners={partners}
             backupData={{ menu, partners, orders, expenses, withdrawals }}
             onAddGroup={(name) => act("menu", "add-group", { name })}
+            onRenameGroup={(groupId, name) => act("menu", "rename-group", { groupId, name })}
             onRemoveGroup={(groupId) => act("menu", "remove-group", { groupId })}
             onAddItem={(groupId, item) => act("menu", "add-item", { groupId, item })}
+            onUpdateItem={(groupId, item) => act("menu", "update-item", { groupId, item })}
             onRemoveItem={(groupId, itemId) => act("menu", "remove-item", { groupId, itemId })}
             onRenamePartner={(id, name) => act("partners", "rename", { id, name })} />
         )}
@@ -572,9 +574,9 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
   const [togglingId, setTogglingId] = useState(null);
   const [returningId, setReturningId] = useState(null);
 
-  const markUnpaid = async (id) => {
+  const handleToggle = async (id) => {
     setTogglingId(id);
-    await onTogglePaid(id);
+    await onTogglePaid(id); // instant, one click -- defaults to shared account
     setTogglingId(null);
   };
 
@@ -601,7 +603,7 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
                 onCancel={() => setEditingId(null)} />
             ) : pickingCollectorId === o.id ? (
               <CollectorPicker key={o.id} order={o} partners={partners}
-                onConfirm={async (collectedBy) => { await onTogglePaid(o.id, collectedBy); setPickingCollectorId(null); }}
+                onConfirm={async (collectedBy) => { await onUpdate({ ...o, collectedBy }); setPickingCollectorId(null); }}
                 onCancel={() => setPickingCollectorId(null)} />
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
@@ -610,19 +612,27 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
-                  {o.paid && o.collectedBy && (
+                  {o.paid && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 12, color: C.ember }}>Collected by {partnerName(o.collectedBy) || "Unknown"}</span>
-                      <button onClick={() => returnToShared(o)} disabled={returningId === o.id} className="om-btn"
-                        style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, border: `1px solid ${C.ember}`, background: "transparent", color: C.ember, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
-                        {returningId === o.id ? <Loader2 className="om-spin" size={11} /> : null} Mark as returned to shared account
-                      </button>
+                      {o.collectedBy ? (
+                        <>
+                          <span style={{ fontSize: 12, color: C.ember }}>Collected by {partnerName(o.collectedBy) || "Unknown"}</span>
+                          <button onClick={() => returnToShared(o)} disabled={returningId === o.id} className="om-btn"
+                            style={quickTagBtn}>
+                            {returningId === o.id ? <Loader2 className="om-spin" size={11} /> : null} Mark as returned to shared account
+                          </button>
+                        </>
+                      ) : (
+                        <button onClick={() => setPickingCollectorId(o.id)} className="om-btn" style={quickTagBtn}>
+                          A partner collected this cash instead of shared?
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
                 <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(o.total)}</div>
                 <button
-                  onClick={() => (o.paid ? markUnpaid(o.id) : setPickingCollectorId(o.id))}
+                  onClick={() => handleToggle(o.id)}
                   disabled={togglingId === o.id} className="om-btn"
                   style={{ ...pill, background: o.paid ? C.successTint : C.warningTint, color: o.paid ? C.success : C.warning, opacity: togglingId === o.id ? 0.6 : 1 }}>
                   {togglingId === o.id ? <Loader2 className="om-spin" size={13} /> : (o.paid ? <Check size={13} /> : null)} {o.paid ? "Paid" : "Unpaid"}
@@ -932,60 +942,133 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
   );
 }
 
-function GroupCard({ group, onAddItem, onRemoveItem, onRemoveGroup }) {
-  const [itemName, setItemName] = useState("");
-  const [variantRows, setVariantRows] = useState([{ id: uid(), label: "", price: "" }]);
+function ItemForm({ initialName = "", initialVariants, submitLabel, onSubmit, onCancel }) {
+  const [itemName, setItemName] = useState(initialName);
+  const [variantRows, setVariantRows] = useState(
+    initialVariants && initialVariants.length
+      ? initialVariants.map((v) => ({ id: uid(), label: v.label || "", price: String(v.price) }))
+      : [{ id: uid(), label: "", price: "" }]
+  );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const addVariantRow = () => setVariantRows([...variantRows, { id: uid(), label: "", price: "" }]);
   const updateVariantRow = (id, patch) => setVariantRows(variantRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const removeVariantRow = (id) => setVariantRows(variantRows.filter((r) => r.id !== id));
 
-  const submitItem = async () => {
+  const submit = async () => {
     if (!itemName.trim()) { setError("Item name is required."); return; }
     const variants = variantRows.filter((r) => r.price !== "" && Number(r.price) > 0).map((r) => ({ id: uid(), label: r.label.trim(), price: Number(r.price) }));
     if (variants.length === 0) { setError("At least one price is required."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onAddItem({ id: uid(), name: itemName.trim(), variants });
+    const res = await onSubmit({ name: itemName.trim(), variants });
     setSubmitting(false);
     if (res && !res.ok) { setError(res.error); return; }
-    setItemName(""); setVariantRows([{ id: uid(), label: "", price: "" }]);
+    if (!onCancel) { setItemName(""); setVariantRows([{ id: uid(), label: "", price: "" }]); } // reset only for "add" mode
   };
+
+  return (
+    <div>
+      <label style={fieldLabel}>Item name</label>
+      <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => { setItemName(e.target.value); setError(""); }} />
+      <label style={{ ...fieldLabel, marginTop: 10 }}>Price options</label>
+      {variantRows.map((r) => (
+        <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
+          <input className="om-input" style={{ ...input, flex: 1 }} placeholder="Style name (optional, e.g. Regular)" value={r.label} onChange={(e) => updateVariantRow(r.id, { label: e.target.value })} />
+          <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => { updateVariantRow(r.id, { price: e.target.value }); setError(""); }} />
+          {variantRows.length > 1 && (<button onClick={() => removeVariantRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove price option"><X size={14} /></button>)}
+        </div>
+      ))}
+      <button onClick={addVariantRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another price option</button>
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        {onCancel && (
+          <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        )}
+        <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, marginTop: 0, width: onCancel ? "auto" : "100%", opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={14} /> : <Plus size={14} />} {submitting ? "Saving..." : submitLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function GroupNameEditor({ group, onRenameGroup }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(group.name);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) { setError("Category name cannot be empty."); return; }
+    if (trimmed === group.name) { setEditing(false); return; }
+    setError("");
+    setSaving(true);
+    const res = await onRenameGroup(trimmed);
+    setSaving(false);
+    if (res && !res.ok) { setError(res.error); return; }
+    setEditing(false);
+  };
+
+  if (!editing) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ fontWeight: 600, fontSize: 15 }}>{group.name}</div>
+        <button onClick={() => { setValue(group.name); setEditing(true); }} style={{ ...iconBtn, width: 26, height: 26 }} className="om-btn" aria-label="Rename category"><Pencil size={12} /></button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <input className="om-input" style={{ ...input, width: 160 }} value={value} onChange={(e) => { setValue(e.target.value); setError(""); }}
+        onKeyDown={(e) => e.key === "Enter" && save()} autoFocus />
+      <button onClick={save} disabled={saving} style={{ ...iconBtn, width: 30, height: 30, color: C.success, borderColor: C.success }} className="om-btn" aria-label="Save category name">
+        {saving ? <Loader2 className="om-spin" size={14} /> : <Check size={14} />}
+      </button>
+      <button onClick={() => setEditing(false)} disabled={saving} style={{ ...iconBtn, width: 30, height: 30 }} className="om-btn" aria-label="Cancel"><X size={14} /></button>
+      <ErrorText>{error}</ErrorText>
+    </div>
+  );
+}
+
+function GroupCard({ group, onAddItem, onUpdateItem, onRemoveItem, onRemoveGroup, onRenameGroup }) {
+  const [editingItemId, setEditingItemId] = useState(null);
 
   return (
     <div style={lineBox}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontWeight: 600, fontSize: 15 }}>{group.name}</div>
+        <GroupNameEditor group={group} onRenameGroup={onRenameGroup} />
         <ConfirmDelete label={`${group.name} category`} onConfirm={onRemoveGroup} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
-        {group.items.map((it) => (
-          <div key={it.id} style={rowCard}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 14, fontWeight: 500 }}>{it.name}</div>
-              <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{it.variants.map((v) => `${v.label ? v.label + " " : ""}${money(v.price)}`).join(" · ")}</div>
+        {group.items.map((it) =>
+          editingItemId === it.id ? (
+            <div key={it.id} style={{ ...lineBox, background: C.card }}>
+              <ItemForm
+                initialName={it.name} initialVariants={it.variants} submitLabel="Save item"
+                onSubmit={async ({ name, variants }) => {
+                  const res = await onUpdateItem({ id: it.id, name, variants });
+                  if (res.ok) setEditingItemId(null);
+                  return res;
+                }}
+                onCancel={() => setEditingItemId(null)}
+              />
             </div>
-            <ConfirmDelete label={it.name} onConfirm={() => onRemoveItem(it.id)} />
-          </div>
-        ))}
+          ) : (
+            <div key={it.id} style={rowCard}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 500 }}>{it.name}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{it.variants.map((v) => `${v.label ? v.label + " " : ""}${money(v.price)}`).join(" · ")}</div>
+              </div>
+              <button onClick={() => setEditingItemId(it.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit item"><Pencil size={14} /></button>
+              <ConfirmDelete label={it.name} onConfirm={() => onRemoveItem(it.id)} />
+            </div>
+          )
+        )}
       </div>
       <div style={{ borderTop: `1px dashed ${C.border}`, paddingTop: 12 }}>
-        <label style={fieldLabel}>New item name</label>
-        <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => { setItemName(e.target.value); setError(""); }} />
-        <label style={{ ...fieldLabel, marginTop: 10 }}>Price options</label>
-        {variantRows.map((r) => (
-          <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
-            <input className="om-input" style={{ ...input, flex: 1 }} placeholder="Style name (optional, e.g. Regular)" value={r.label} onChange={(e) => updateVariantRow(r.id, { label: e.target.value })} />
-            <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => { updateVariantRow(r.id, { price: e.target.value }); setError(""); }} />
-            {variantRows.length > 1 && (<button onClick={() => removeVariantRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove price option"><X size={14} /></button>)}
-          </div>
-        ))}
-        <button onClick={addVariantRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another price option</button>
-        <ErrorText>{error}</ErrorText>
-        <button onClick={submitItem} disabled={submitting} style={{ ...primaryBtn, marginTop: 12, opacity: submitting ? 0.7 : 1 }} className="om-btn">
-          {submitting ? <Loader2 className="om-spin" size={14} /> : <Plus size={14} />} {submitting ? "Adding..." : `Add item to ${group.name}`}
-        </button>
+        <ItemForm submitLabel={`Add item to ${group.name}`} onSubmit={(item) => onAddItem({ id: uid(), ...item })} />
       </div>
     </div>
   );
@@ -1032,7 +1115,7 @@ function PartnerNameInput({ partner, index, onRenamePartner }) {
   );
 }
 
-function SettingsTab({ menu, partners, backupData, onAddGroup, onRemoveGroup, onAddItem, onRemoveItem, onRenamePartner }) {
+function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner }) {
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
@@ -1061,8 +1144,10 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRemoveGroup, on
         {menu.map((g) => (
           <GroupCard key={g.id} group={g}
             onAddItem={(item) => onAddItem(g.id, item)}
+            onUpdateItem={(item) => onUpdateItem(g.id, item)}
             onRemoveItem={(iid) => onRemoveItem(g.id, iid)}
-            onRemoveGroup={() => onRemoveGroup(g.id)} />
+            onRemoveGroup={() => onRemoveGroup(g.id)}
+            onRenameGroup={(name) => onRenameGroup(g.id, name)} />
         ))}
       </div>
       <div style={{ ...card, marginTop: 14 }}>
@@ -1091,12 +1176,12 @@ const wrap = { maxWidth: 740, margin: "0 auto", padding: "1.25rem 1rem", color: 
 const displayH1 = { fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 21, textAlign: "center", color: C.ink, letterSpacing: "-0.01em" };
 const displayNum = { fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, color: C.ink };
 const badge = { background: C.moss, color: "#FAF6EE", width: 42, height: 42, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 };
-const gateCard = { maxWidth: 360, margin: "3rem auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "30px 26px", boxShadow: "0 1px 2px rgba(35,41,31,0.05), 0 8px 24px rgba(35,41,31,0.06)" };
-const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, boxShadow: "0 1px 2px rgba(35,41,31,0.04), 0 4px 12px rgba(35,41,31,0.03)" };
-const lineBox = { border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, background: "#FDFBF6" };
+const gateCard = { maxWidth: 360, margin: "3rem auto", background: C.card, border: `1px solid ${C.border}`, borderRadius: 18, padding: "30px 26px", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 8px 24px rgba(0,0,0,0.4)" };
+const card = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03), 0 2px 10px rgba(0,0,0,0.3)" };
+const lineBox = { border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, background: "#22261F" };
 const cardTitle = { fontFamily: "'Space Grotesk', sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 14, color: C.ink };
 const sectionTitle = { fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 12 };
-const rowCard = { display: "flex", alignItems: "center", background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 14px", boxShadow: "0 1px 2px rgba(35,41,31,0.03)" };
+const rowCard = { display: "flex", alignItems: "center", background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 14px", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)" };
 const emptyState = { color: C.muted, fontSize: 14, padding: "18px 0", textAlign: "center", border: `1px dashed ${C.border}`, borderRadius: 12 };
 const safetyNote = { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.moss, background: C.mossTint, border: `1px solid ${C.moss}22`, borderRadius: 10, padding: "10px 12px" };
 const fieldLabel = { display: "block", fontSize: 12, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 6 };
@@ -1105,11 +1190,12 @@ const primaryBtn = { display: "flex", alignItems: "center", gap: 6, justifyConte
 const ghostBtn = { display: "flex", alignItems: "center", gap: 6, marginTop: 10, padding: "7px 12px", borderRadius: 10, border: `1px dashed ${C.ember}`, background: "transparent", color: C.ember, fontSize: 13, fontWeight: 500, cursor: "pointer" };
 const iconBtn = { display: "flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, borderRadius: 9, border: `1px solid ${C.border}`, background: C.card, color: C.muted, cursor: "pointer", flexShrink: 0 };
 const pill = { display: "flex", alignItems: "center", gap: 4, padding: "6px 12px", borderRadius: 999, border: "none", fontSize: 12, fontWeight: 600, cursor: "pointer", marginRight: 10 };
+const quickTagBtn = { fontSize: 11, padding: "2px 8px", borderRadius: 999, border: `1px solid ${C.ember}`, background: "transparent", color: C.ember, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 };
 const qtyPreset = { padding: "6px 13px", borderRadius: 999, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 13, fontWeight: 500, cursor: "pointer" };
 const qtyPresetActive = { background: C.mossTint, borderColor: C.moss, color: C.mossDark, fontWeight: 700 };
 const stepBtn = { width: 30, height: 30, borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 16, lineHeight: 1, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" };
 const tabRow = { display: "flex", gap: 6, marginBottom: 22, flexWrap: "wrap", borderBottom: `1px solid ${C.border}`, paddingBottom: 12 };
 const tabBtn = { display: "flex", alignItems: "center", gap: 6, padding: "9px 15px", borderRadius: 10, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500 };
-const statCard = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px", textAlign: "left", boxShadow: "0 1px 2px rgba(35,41,31,0.03)" };
+const statCard = { background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "14px 16px", textAlign: "left", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)" };
 const statLabel = { fontSize: 12, color: C.muted, marginBottom: 5, fontWeight: 500 };
 const statValue = { fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 600 };
