@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_B2xld9g2fjoQp0QQ0al24DOvRZHA",
+      "name": "order-manager",
+      "directory": ".",
+      "orgId": "team_75tGfjP5VKZr35NHPOOoMc99"
+    }
+  ]
+}
