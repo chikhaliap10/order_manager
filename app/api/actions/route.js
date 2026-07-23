@@ -33,7 +33,15 @@ export async function POST(req) {
       } else if (action === "update") {
         orders = orders.map((o) => (o.id === payload.id ? payload : o));
       } else if (action === "toggle-paid") {
-        orders = orders.map((o) => (o.id === payload.id ? { ...o, paid: !o.paid } : o));
+        orders = orders.map((o) => {
+          if (o.id !== payload.id) return o;
+          const newPaid = !o.paid;
+          // collectedBy is who physically holds the cash for this order --
+          // "" means the shared account, a partner id means that partner
+          // personally took it. Cleared automatically when marked unpaid,
+          // since nobody holds money for an order that hasn't been paid.
+          return { ...o, paid: newPaid, collectedBy: newPaid ? (payload.collectedBy || "") : "" };
+        });
       } else if (action === "delete") {
         orders = orders.filter((o) => o.id !== payload.id);
       }

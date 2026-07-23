@@ -156,10 +156,19 @@ export default function HomePage() {
     const netProfit = income - expenseTotal;
     const share = partners.length ? netProfit / partners.length : 0;
     const withdrawnByPartner = {};
+    const collectedByPartner = {};
+    const paidExpensesByPartner = {};
     partners.forEach((p) => {
       withdrawnByPartner[p.id] = withdrawals.filter((w) => w.partnerId === p.id).reduce((s, w) => s + Number(w.amount || 0), 0);
+      // Cash a partner personally collected from a paid order is money
+      // they're already holding -- it counts against their balance exactly
+      // like a withdrawal would, even though no formal withdrawal was made.
+      collectedByPartner[p.id] = orders.filter((o) => o.paid && o.collectedBy === p.id).reduce((s, o) => s + o.total, 0);
+      // Expenses a partner paid out of their own pocket are the opposite --
+      // they fronted business money personally, so it's credited back.
+      paidExpensesByPartner[p.id] = expenses.filter((e) => e.paidBy === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
     });
-    return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner };
+    return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner, collectedByPartner, paidExpensesByPartner };
   }, [orders, expenses, withdrawals, partners]);
 
   const GlobalStyle = () => (
@@ -257,13 +266,13 @@ export default function HomePage() {
             onCreate={(order) => act("order", "create", order)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={orders}
-            onTogglePaid={(id) => act("order", "toggle-paid", { id })}
+          <OrderHistoryTab menu={menu} orders={orders} partners={partners}
+            onTogglePaid={(id, collectedBy) => act("order", "toggle-paid", { id, collectedBy })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })} />
         )}
         {tab === "expenses" && (
-          <ExpensesTab expenses={expenses}
+          <ExpensesTab expenses={expenses} partners={partners}
             onCreate={(e) => act("expense", "create", e)}
             onUpdate={(e) => act("expense", "update", e)}
             onDelete={(id) => act("expense", "delete", { id })} />
@@ -462,9 +471,10 @@ function orderToLines(order, menu) {
   });
 }
 
-function OrderEditForm({ order, menu, onSave, onCancel }) {
+function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
   const [lines, setLines] = useState(orderToLines(order, menu));
+  const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
@@ -486,7 +496,7 @@ function OrderEditForm({ order, menu, onSave, onCancel }) {
     if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...order, customer: customer.trim(), items, total: items.reduce((s, i) => s + i.price * i.qty, 0) });
+    const res = await onSave({ ...order, customer: customer.trim(), items, total: items.reduce((s, i) => s + i.price * i.qty, 0), collectedBy: order.paid ? collectedBy : "" });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -496,6 +506,15 @@ function OrderEditForm({ order, menu, onSave, onCancel }) {
       <div style={cardTitle}>Editing order</div>
       <label style={fieldLabel}>Customer name</label>
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
+      {order.paid && (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Collected by</label>
+          <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
+            <option value="">Shared account</option>
+            {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </>
+      )}
       <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         {lines.map((l) => (
           <OrderLineRow key={l.id} line={l} menu={menu} onChange={updateLine} onRemove={() => removeLine(l.id)} removable={lines.length > 1} />
@@ -519,19 +538,57 @@ function OrderEditForm({ order, menu, onSave, onCancel }) {
   );
 }
 
-function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
-  const [editingId, setEditingId] = useState(null);
-  const [togglingId, setTogglingId] = useState(null);
+function CollectorPicker({ order, partners, onConfirm, onCancel }) {
+  const [collectedBy, setCollectedBy] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const handleToggle = async (id) => {
+  const confirm = async () => {
+    setSubmitting(true);
+    await onConfirm(collectedBy);
+    setSubmitting(false);
+  };
+
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.warning}` }}>
+      <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>{order.customer} — {money(order.total)}</div>
+      <label style={fieldLabel}>Who collected this payment?</label>
+      <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
+        <option value="">Shared account</option>
+        {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Mark paid"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDelete }) {
+  const [editingId, setEditingId] = useState(null);
+  const [pickingCollectorId, setPickingCollectorId] = useState(null);
+  const [togglingId, setTogglingId] = useState(null);
+  const [returningId, setReturningId] = useState(null);
+
+  const markUnpaid = async (id) => {
     setTogglingId(id);
     await onTogglePaid(id);
     setTogglingId(null);
   };
 
+  const returnToShared = async (order) => {
+    setReturningId(order.id);
+    await onUpdate({ ...order, collectedBy: "" });
+    setReturningId(null);
+  };
+
+  const partnerName = (id) => partners.find((p) => p.id === id)?.name;
+
   return (
     <div>
-      <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and logged to Google Sheets as a backup — nothing is lost.</div>
+      <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
       <div style={{ ...sectionTitle, marginTop: 18 }}>{orders.length} order{orders.length === 1 ? "" : "s"} recorded</div>
       {orders.length === 0 ? (
         <div style={emptyState}>No orders yet — add one from the New order tab.</div>
@@ -539,9 +596,13 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {orders.map((o) =>
             editingId === o.id ? (
-              <OrderEditForm key={o.id} order={o} menu={menu}
+              <OrderEditForm key={o.id} order={o} menu={menu} partners={partners}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
+            ) : pickingCollectorId === o.id ? (
+              <CollectorPicker key={o.id} order={o} partners={partners}
+                onConfirm={async (collectedBy) => { await onTogglePaid(o.id, collectedBy); setPickingCollectorId(null); }}
+                onCancel={() => setPickingCollectorId(null)} />
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -549,9 +610,20 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
+                  {o.paid && o.collectedBy && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: C.ember }}>Collected by {partnerName(o.collectedBy) || "Unknown"}</span>
+                      <button onClick={() => returnToShared(o)} disabled={returningId === o.id} className="om-btn"
+                        style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, border: `1px solid ${C.ember}`, background: "transparent", color: C.ember, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                        {returningId === o.id ? <Loader2 className="om-spin" size={11} /> : null} Mark as returned to shared account
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(o.total)}</div>
-                <button onClick={() => handleToggle(o.id)} disabled={togglingId === o.id} className="om-btn"
+                <button
+                  onClick={() => (o.paid ? markUnpaid(o.id) : setPickingCollectorId(o.id))}
+                  disabled={togglingId === o.id} className="om-btn"
                   style={{ ...pill, background: o.paid ? C.successTint : C.warningTint, color: o.paid ? C.success : C.warning, opacity: togglingId === o.id ? 0.6 : 1 }}>
                   {togglingId === o.id ? <Loader2 className="om-spin" size={13} /> : (o.paid ? <Check size={13} /> : null)} {o.paid ? "Paid" : "Unpaid"}
                 </button>
@@ -566,10 +638,11 @@ function OrderHistoryTab({ menu, orders, onTogglePaid, onUpdate, onDelete }) {
   );
 }
 
-function ExpenseEditForm({ expense, onSave, onCancel }) {
+function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
   const [category, setCategory] = useState(expense.category);
   const [amount, setAmount] = useState(String(expense.amount));
   const [note, setNote] = useState(expense.note || "");
+  const [paidBy, setPaidBy] = useState(expense.paidBy || "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -578,7 +651,7 @@ function ExpenseEditForm({ expense, onSave, onCancel }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...expense, category, amount: Number(amount), note });
+    const res = await onSave({ ...expense, category, amount: Number(amount), note, paidBy });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -598,6 +671,11 @@ function ExpenseEditForm({ expense, onSave, onCancel }) {
           <input type="number" step="0.01" min="0.01" className="om-input" style={input} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
         </div>
       </div>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Paid by</label>
+      <select className="om-input" style={input} value={paidBy} onChange={(e) => setPaidBy(e.target.value)}>
+        <option value="">Shared account</option>
+        {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+      </select>
       <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
       <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
       <ErrorText>{error}</ErrorText>
@@ -611,10 +689,11 @@ function ExpenseEditForm({ expense, onSave, onCancel }) {
   );
 }
 
-function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
+function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
   const [amount, setAmount] = useState("");
   const [category, setCategory] = useState("Ingredients");
   const [note, setNote] = useState("");
+  const [paidBy, setPaidBy] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -624,10 +703,18 @@ function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, ts: Date.now() });
+    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, paidBy, ts: Date.now() });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    setAmount(""); setNote("");
+    setAmount(""); setNote(""); setPaidBy("");
+  };
+
+  const partnerName = (id) => partners.find((p) => p.id === id)?.name;
+  const [reimbursingId, setReimbursingId] = useState(null);
+  const markReimbursed = async (expense) => {
+    setReimbursingId(expense.id);
+    await onUpdate({ ...expense, paidBy: "" });
+    setReimbursingId(null);
   };
 
   return (
@@ -646,6 +733,11 @@ function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
             <input type="number" step="0.01" min="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
           </div>
         </div>
+        <label style={{ ...fieldLabel, marginTop: 12 }}>Paid by</label>
+        <select className="om-input" style={input} value={paidBy} onChange={(e) => setPaidBy(e.target.value)}>
+          <option value="">Shared account</option>
+          {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Sunday market veggie run" value={note} onChange={(e) => setNote(e.target.value)} />
         <ErrorText>{error}</ErrorText>
@@ -660,7 +752,7 @@ function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {expenses.map((e) =>
             editingId === e.id ? (
-              <ExpenseEditForm key={e.id} expense={e}
+              <ExpenseEditForm key={e.id} expense={e} partners={partners}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
             ) : (
@@ -668,6 +760,15 @@ function ExpensesTab({ expenses, onCreate, onUpdate, onDelete }) {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, fontSize: 15 }}>{e.category}</div>
                   {e.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{e.note}</div>}
+                  {e.paidBy && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, color: C.ember }}>Paid by {partnerName(e.paidBy) || "Unknown"}</span>
+                      <button onClick={() => markReimbursed(e)} disabled={reimbursingId === e.id} className="om-btn"
+                        style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, border: `1px solid ${C.ember}`, background: "transparent", color: C.ember, cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                        {reimbursingId === e.id ? <Loader2 className="om-spin" size={11} /> : null} Mark as reimbursed
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div style={{ ...displayNum, fontSize: 15, marginRight: 14, color: C.danger }}>-{money(e.amount)}</div>
                 <button onClick={() => setEditingId(e.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit expense"><Pencil size={14} /></button>
@@ -752,7 +853,9 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))", gap: 12, marginBottom: 26 }}>
         {partners.map((p) => {
           const withdrawn = totals.withdrawnByPartner[p.id] || 0;
-          const balance = totals.share - withdrawn;
+          const collected = totals.collectedByPartner[p.id] || 0;
+          const paidPersonally = totals.paidExpensesByPartner[p.id] || 0;
+          const balance = totals.share - withdrawn - collected + paidPersonally;
           return (
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${C.ember}`, textAlign: "left" }}>
               <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 10 }}>{p.name}</div>
@@ -760,6 +863,18 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(totals.share)}</div>
               <div style={statLabel}>Withdrawn</div>
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(withdrawn)}</div>
+              {collected > 0 && (
+                <>
+                  <div style={statLabel}>Cash collected (not yet returned)</div>
+                  <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.danger }}>-{money(collected)}</div>
+                </>
+              )}
+              {paidPersonally > 0 && (
+                <>
+                  <div style={statLabel}>Expenses paid personally</div>
+                  <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(paidPersonally)}</div>
+                </>
+              )}
               <div style={statLabel}>Current balance</div>
               <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(balance)}</div>
             </div>
