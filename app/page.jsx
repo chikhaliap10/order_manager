@@ -610,6 +610,41 @@ function CollectorPicker({ order, partners, onConfirm, onCancel }) {
   );
 }
 
+function computeItemBreakdown(orders) {
+  const map = {};
+  orders.forEach((o) => {
+    (o.items || []).forEach((i) => {
+      const key = i.variantLabel ? `${i.name} (${i.variantLabel})` : i.name;
+      if (!map[key]) map[key] = { key, qty: 0, revenue: 0 };
+      map[key].qty += Number(i.qty) || 0;
+      map[key].revenue += (Number(i.price) || 0) * (Number(i.qty) || 0);
+    });
+  });
+  return Object.values(map).sort((a, b) => b.revenue - a.revenue);
+}
+
+function SalesBreakdown({ orders }) {
+  const rows = computeItemBreakdown(orders);
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Plates sold by item</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Across all orders, paid and unpaid</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {rows.map((r) => (
+          <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 14 }}>{r.key}</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <span style={{ fontSize: 13, color: C.muted }}>{r.qty} plate{r.qty === 1 ? "" : "s"}</span>
+              <span style={{ ...displayNum, fontSize: 14, color: C.moss }}>{money(r.revenue)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDelete }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
@@ -632,6 +667,7 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
 
   return (
     <div>
+      <SalesBreakdown orders={orders} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
       <div style={{ ...sectionTitle, marginTop: 18 }}>{orders.length} order{orders.length === 1 ? "" : "s"} recorded</div>
       {orders.length === 0 ? (
