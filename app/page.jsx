@@ -323,18 +323,24 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
   const item = group?.items.find((i) => i.id === line.itemId);
   const hasVariants = item && item.variants.length > 1;
   const variant = item?.variants.find((v) => v.id === line.variantId);
-  const total = (variant?.price || 0) * (Number(line.qty) || 0);
+  const price = line.price !== undefined && line.price !== "" ? Number(line.price) : (variant?.price || 0);
+  const total = price * (Number(line.qty) || 0);
+  const isCustomPrice = variant && Number(line.price) !== variant.price;
 
   const onGroupChange = (groupId) => {
     const g = menu.find((mg) => mg.id === groupId);
     const it = g?.items?.[0];
     const v = it?.variants?.[0];
-    onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "" });
+    onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", price: v?.price ?? "" });
   };
   const onItemChange = (itemId) => {
     const it = group?.items.find((i) => i.id === itemId);
     const v = it?.variants?.[0];
-    onChange({ ...line, itemId, variantId: v?.id || "" });
+    onChange({ ...line, itemId, variantId: v?.id || "", price: v?.price ?? "" });
+  };
+  const onVariantChange = (variantId) => {
+    const v = item?.variants.find((vv) => vv.id === variantId);
+    onChange({ ...line, variantId, price: v?.price ?? "" });
   };
 
   return (
@@ -358,19 +364,30 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
         ))}
       </div>
 
-      {hasVariants ? (
+      {hasVariants && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
             {item.variants.map((v) => (
-              <button key={v.id} onClick={() => onChange({ ...line, variantId: v.id })} className="om-btn"
+              <button key={v.id} onClick={() => onVariantChange(v.id)} className="om-btn"
                 style={{ ...qtyPreset, ...(line.variantId === v.id ? qtyPresetActive : {}) }}>{v.label} — {money(v.price)}</button>
             ))}
           </div>
         </>
-      ) : (
-        <div style={{ marginTop: 10, fontSize: 13, color: C.muted }}>Price: <span style={{ color: C.moss, fontWeight: 600 }}>{money(item?.variants[0]?.price)}</span></div>
       )}
+
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Price per item{isCustomPrice ? " (custom)" : ""}</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+        <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 100 }}
+          value={line.price !== undefined ? line.price : (variant?.price ?? "")}
+          onChange={(e) => onChange({ ...line, price: e.target.value })} />
+        {isCustomPrice && (
+          <span style={{ fontSize: 12, color: C.ember }}>
+            menu price is {money(variant?.price)} — <button onClick={() => onChange({ ...line, price: variant?.price })} className="om-btn"
+              style={{ background: "none", border: "none", color: C.ember, textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}>reset</button>
+          </span>
+        )}
+      </div>
 
       <label style={{ ...fieldLabel, marginTop: 12 }}>Quantity</label>
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
@@ -393,11 +410,12 @@ function firstItem(group) { return group?.items?.[0]; }
 
 function NewOrderTab({ menu, onCreate }) {
   const [customer, setCustomer] = useState("");
+  const [tip, setTip] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const makeLine = () => {
     const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
-    return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 };
+    return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" };
   };
   const [lines, setLines] = useState(menu.length ? [makeLine()] : []);
   useEffect(() => { if (menu.length && lines.length === 0) setLines([makeLine()]); }, [menu]);
@@ -406,24 +424,27 @@ function NewOrderTab({ menu, onCreate }) {
   const updateLine = (updated) => setLines(lines.map((l) => (l.id === updated.id ? updated : l)));
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const addLine = () => setLines([...lines, makeLine()]);
-  const lineTotal = (l) => (getVariant(l)?.price || 0) * (Number(l.qty) || 0);
-  const orderTotal = lines.reduce((s, l) => s + lineTotal(l), 0);
+  const linePrice = (l) => (l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0));
+  const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
+  const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
+  const tipAmount = Number(tip) || 0;
+  const orderTotal = subtotal + tipAmount;
 
   const submit = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
     const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
       const it = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
       const v = getVariant(l);
-      return { name: it?.name || "Item", variantLabel: v?.label || "", price: v?.price || 0, qty: Number(l.qty) };
+      return { name: it?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
     });
     if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
     setError("");
     setSubmitting(true);
-    const total = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onCreate({ id: uid(), customer: customer.trim(), items, total, paid: false, ts: Date.now() });
+    const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
+    const res = await onCreate({ id: uid(), customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, paid: false, ts: Date.now() });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    setCustomer(""); setLines([makeLine()]);
+    setCustomer(""); setTip(""); setLines([makeLine()]);
   };
 
   return (
@@ -442,15 +463,24 @@ function NewOrderTab({ menu, onCreate }) {
               ))}
             </div>
             <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
+            <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
+            <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
             <ErrorText>{error}</ErrorText>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-              <div>
-                <div style={fieldLabel}>Order total</div>
-                <div style={{ ...displayNum, fontSize: 22, color: C.moss }}>{money(orderTotal)}</div>
+            <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+              {tipAmount > 0 && (
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.muted, marginBottom: 6 }}>
+                  <span>Subtotal {money(subtotal)} + tip {money(tipAmount)}</span>
+                </div>
+              )}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={fieldLabel}>Order total</div>
+                  <div style={{ ...displayNum, fontSize: 22, color: C.moss }}>{money(orderTotal)}</div>
+                </div>
+                <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+                  {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Save order"}
+                </button>
               </div>
-              <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
-                {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Save order"}
-              </button>
             </div>
           </>
         )}
@@ -465,40 +495,45 @@ function orderToLines(order, menu) {
       const item = g.items.find((i) => i.name === it.name);
       if (item) {
         const variant = item.variants.find((v) => v.label === it.variantLabel) || item.variants[0];
-        return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty };
+        return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty, price: it.price };
       }
     }
     const g = menu[0]; const item = firstItem(g); const v = firstVariant(item);
-    return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", variantId: v?.id || "", qty: it.qty };
+    return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", variantId: v?.id || "", qty: it.qty, price: it.price };
   });
 }
 
 function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
   const [lines, setLines] = useState(orderToLines(order, menu));
+  const [tip, setTip] = useState(order.tip ? String(order.tip) : "");
   const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
-  const lineTotal = (l) => (getVariant(l)?.price || 0) * (Number(l.qty) || 0);
-  const total = lines.reduce((s, l) => s + lineTotal(l), 0);
+  const linePrice = (l) => (l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0));
+  const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
+  const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
+  const tipAmount = Number(tip) || 0;
+  const total = subtotal + tipAmount;
   const updateLine = (updated) => setLines(lines.map((l) => (l.id === updated.id ? updated : l)));
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const addLine = () => {
     const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
-    setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
+    setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" }]);
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
     const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
       const item = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
       const v = getVariant(l);
-      return { name: item?.name || "Item", variantLabel: v?.label || "", price: v?.price || 0, qty: Number(l.qty) };
+      return { name: item?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
     });
     if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...order, customer: customer.trim(), items, total: items.reduce((s, i) => s + i.price * i.qty, 0), collectedBy: order.paid ? collectedBy : "" });
+    const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
+    const res = await onSave({ ...order, customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "" });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -523,8 +558,14 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
         ))}
       </div>
       <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
+      <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
+      <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
       <ErrorText>{error}</ErrorText>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+      <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+        {tipAmount > 0 && (
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)} + tip {money(tipAmount)}</div>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={fieldLabel}>New total</div>
           <div style={{ ...displayNum, fontSize: 22, color: C.moss }}>{money(total)}</div>
@@ -537,6 +578,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
         </div>
       </div>
     </div>
+  </div>
   );
 }
 

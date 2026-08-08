@@ -24,6 +24,8 @@ export async function POST(req) {
       if (action === "create" || action === "update") {
         if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
         if (!Array.isArray(payload.items) || payload.items.length === 0) return badRequest("At least one item is required.");
+        if (payload.tip !== undefined && Number(payload.tip) < 0) return badRequest("Tip cannot be negative.");
+        if (payload.items.some((i) => !(Number(i.price) > 0))) return badRequest("Each item's price must be greater than 0.");
       }
 
       let orders = await getKey("orders", []);
