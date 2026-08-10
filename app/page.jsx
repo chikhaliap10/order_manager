@@ -735,11 +735,7 @@ function SalesBreakdown({ orders }) {
 }
 
 function AmountReceivedPicker({ order, onConfirm, onCancel }) {
-<<<<<<< HEAD
   const [amount, setAmount] = useState(String(order.amountReceived ?? order.total));
-=======
-  const [amount, setAmount] = useState(String(order.total));
->>>>>>> e1583ed6e2f1b886ff54786d9ed0f187dc73100b
   const [submitting, setSubmitting] = useState(false);
   const change = Math.max(0, (Number(amount) || 0) - order.total);
 
@@ -752,12 +748,9 @@ function AmountReceivedPicker({ order, onConfirm, onCancel }) {
   return (
     <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.ember}` }}>
       <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>{order.customer} — bill is {money(order.total)}</div>
-<<<<<<< HEAD
       {order.amountReceived !== undefined && (
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Currently on file: received {money(order.amountReceived)}</div>
       )}
-=======
->>>>>>> e1583ed6e2f1b886ff54786d9ed0f187dc73100b
       <label style={fieldLabel}>Amount actually received</label>
       <input type="number" step="0.01" min="0" className="om-input" style={input} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
       {change > 0 && (
@@ -797,7 +790,6 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
   };
 
   const recordAmountReceived = async (order, amountReceived) => {
-<<<<<<< HEAD
     const previousReceived = order.amountReceived ?? order.total;
     const previousChange = Math.max(0, previousReceived - order.total);
     const newChange = Math.max(0, amountReceived - order.total);
@@ -808,12 +800,6 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
         customer: order.customer, amount: delta,
         note: previousChange > 0 ? `Corrected overpayment on order for ${order.customer}` : `Overpayment on order for ${order.customer}`,
       });
-=======
-    const change = Math.max(0, amountReceived - order.total);
-    await onUpdate({ ...order, amountReceived });
-    if (change > 0) {
-      await onAddCredit({ customer: order.customer, amount: change, note: `Overpayment on order for ${order.customer}` });
->>>>>>> e1583ed6e2f1b886ff54786d9ed0f187dc73100b
     }
     setRecordingAmountId(null);
   };
@@ -870,13 +856,9 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
                         </button>
                       )}
                       <button onClick={() => setRecordingAmountId(o.id)} className="om-btn" style={quickTagBtn}>
-<<<<<<< HEAD
                         {o.amountReceived !== undefined && o.amountReceived > o.total
                           ? `Received ${money(o.amountReceived)} (${money(o.amountReceived - o.total)} owed to them)`
                           : "Paid more than the bill?"}
-=======
-                        Paid more than the bill?
->>>>>>> e1583ed6e2f1b886ff54786d9ed0f187dc73100b
                       </button>
                     </div>
                   )}
