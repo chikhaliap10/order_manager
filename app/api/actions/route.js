@@ -150,6 +150,18 @@ export async function POST(req) {
         credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", ts: Date.now() }, ...credits];
         await setKey("credits", credits);
         return Response.json({ credits });
+      } else if (action === "update") {
+        if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
+        if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
+        let credits = await getKey("credits", []);
+        credits = credits.map((c) => (c.id === payload.id ? { ...c, customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "" } : c));
+        await setKey("credits", credits);
+        return Response.json({ credits });
+      } else if (action === "delete") {
+        let credits = await getKey("credits", []);
+        credits = credits.filter((c) => c.id !== payload.id);
+        await setKey("credits", credits);
+        return Response.json({ credits });
       }
       return Response.json({ error: "unknown action" }, { status: 400 });
     }

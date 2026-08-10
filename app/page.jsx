@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil } from "lucide-react";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -271,11 +271,13 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={orders} partners={partners}
+          <OrderHistoryTab menu={menu} orders={orders} partners={partners} credits={credits}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })}
-            onAddCredit={(entry) => act("credits", "create", entry)} />
+            onAddCredit={(entry) => act("credits", "create", entry)}
+            onUpdateCredit={(entry) => act("credits", "update", entry)}
+            onDeleteCredit={(id) => act("credits", "delete", { id })} />
         )}
         {tab === "expenses" && (
           <ExpensesTab expenses={expenses} partners={partners}
@@ -619,8 +621,11 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
 function CollectorPicker({ order, partners, onConfirm, onCancel }) {
   const [collectedBy, setCollectedBy] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false);
 
   const confirm = async () => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
     setSubmitting(true);
     await onConfirm(collectedBy);
     setSubmitting(false);
@@ -737,9 +742,12 @@ function SalesBreakdown({ orders }) {
 function AmountReceivedPicker({ order, onConfirm, onCancel }) {
   const [amount, setAmount] = useState(String(order.amountReceived ?? order.total));
   const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false); // guards against a rapid double-click firing this twice before React re-renders the disabled button
   const change = Math.max(0, (Number(amount) || 0) - order.total);
 
   const confirm = async () => {
+    if (submittedRef.current) return;
+    submittedRef.current = true;
     setSubmitting(true);
     await onConfirm(Number(amount) || 0);
     setSubmitting(false);
@@ -770,7 +778,103 @@ function AmountReceivedPicker({ order, onConfirm, onCancel }) {
 
 const PAYMENT_METHODS = ["Cash", "Zelle", "Debit Card", "Credit Card"];
 
-function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDelete, onAddCredit }) {
+function CreditEditForm({ entry, onSave, onCancel }) {
+  const [amount, setAmount] = useState(String(entry.amount));
+  const [note, setNote] = useState(entry.note || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false);
+
+  const save = async () => {
+    if (submittedRef.current) return;
+    if (amount === "" || Number.isNaN(Number(amount))) { setError("Enter a valid amount."); return; }
+    submittedRef.current = true;
+    setError("");
+    setSubmitting(true);
+    const res = await onSave({ ...entry, amount: Number(amount), note });
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
+  };
+
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch" }}>
+      <label style={fieldLabel}>Amount (positive = owed to customer, negative = already applied/used)</label>
+      <input type="number" step="0.01" className="om-input" style={input} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} autoFocus />
+      <label style={{ ...fieldLabel, marginTop: 10 }}>Note</label>
+      <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={save} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
+  const [expandedCustomer, setExpandedCustomer] = useState(null);
+  const [editingEntryId, setEditingEntryId] = useState(null);
+
+  const byCustomer = {};
+  credits.forEach((c) => {
+    const key = c.customer.trim();
+    if (!byCustomer[key]) byCustomer[key] = { customer: key, entries: [], balance: 0 };
+    byCustomer[key].entries.push(c);
+    byCustomer[key].balance += Number(c.amount) || 0;
+  });
+  const customers = Object.values(byCustomer).filter((c) => Math.abs(c.balance) > 0.001 || c.entries.length > 0);
+  if (customers.length === 0) return null;
+
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Customer credits</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Money owed to customers from overpayments, and credit already applied to later orders</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {customers.map((c) => (
+          <div key={c.customer}>
+            <div
+              onClick={() => setExpandedCustomer(expandedCustomer === c.customer ? null : c.customer)}
+              style={{ ...rowCard, cursor: "pointer" }}
+            >
+              <div style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{c.customer}</div>
+              <div style={{ ...displayNum, fontSize: 14, color: c.balance > 0 ? C.ember : C.muted, marginRight: 8 }}>
+                {c.balance > 0 ? `${money(c.balance)} owed` : money(c.balance)}
+              </div>
+              <span style={{ fontSize: 12, color: C.muted }}>{expandedCustomer === c.customer ? "hide" : "details"}</span>
+            </div>
+            {expandedCustomer === c.customer && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, marginLeft: 12 }}>
+                {c.entries.map((entry) =>
+                  editingEntryId === entry.id ? (
+                    <CreditEditForm key={entry.id} entry={entry}
+                      onSave={async (updated) => { const res = await onUpdateCredit(updated); if (res.ok) setEditingEntryId(null); return res; }}
+                      onCancel={() => setEditingEntryId(null)} />
+                  ) : (
+                    <div key={entry.id} style={{ ...rowCard, padding: "8px 12px" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 13 }}>{entry.note || "(no note)"}</div>
+                        <div style={{ fontSize: 11, color: C.muted }}>{new Date(entry.ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
+                      </div>
+                      <div style={{ ...displayNum, fontSize: 13, color: entry.amount >= 0 ? C.ember : C.muted, marginRight: 10 }}>
+                        {entry.amount >= 0 ? "+" : ""}{money(entry.amount)}
+                      </div>
+                      <button onClick={() => setEditingEntryId(entry.id)} style={{ ...iconBtn, width: 28, height: 28, marginRight: 4 }} className="om-btn" aria-label="Edit credit entry"><Pencil size={12} /></button>
+                      <ConfirmDelete label="credit entry" onConfirm={() => onDeleteCredit(entry.id)} />
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpdate, onDelete, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
@@ -808,6 +912,7 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
 
   return (
     <div>
+      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
