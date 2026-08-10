@@ -4,6 +4,26 @@ import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+// Converts a plain "YYYY-MM-DD" date into a timestamp at local noon (not
+// midnight) -- this avoids a subtle bug where midnight, when later
+// converted to an ISO date string for day-grouping, can shift to the
+// previous day depending on the browser's timezone offset. Noon is safely
+// in the middle of the day regardless of timezone.
+function dateStringToTs(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0).getTime();
+}
+function tsToDateString(ts) {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function todayDateString() {
+  return tsToDateString(Date.now());
+}
 const QTY_PRESETS = [5, 10, 15, 20, 25];
 
 const C = {
@@ -430,6 +450,7 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
   const [forPartner, setForPartner] = useState(false);
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [settlement, setSettlement] = useState("deduct"); // deduct | cash
+  const [orderDate, setOrderDate] = useState(todayDateString());
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const makeLine = () => {
@@ -465,16 +486,17 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
     const finalTotal = itemsTotal + tipAmount - creditToApply;
+    const ts = dateStringToTs(orderDate);
     const res = await onCreate(
       forPartner
         ? {
             id: uid(), customer: effectiveCustomer.trim(), items, tip: 0, total: itemsTotal,
             paid: true, paymentMethod: settlement === "cash" ? "Cash" : INTERNAL_METHOD,
-            collectedBy: settlement === "deduct" ? partnerId : "", ts: Date.now(),
+            collectedBy: settlement === "deduct" ? partnerId : "", ts,
           }
         : {
             id: uid(), customer: customer.trim(), items, tip: tipAmount,
-            creditApplied: creditToApply, total: finalTotal, paid: false, ts: Date.now(),
+            creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
     setSubmitting(false);
@@ -482,7 +504,7 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
     if (!forPartner && creditToApply > 0) {
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setLines([makeLine()]);
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
   };
 
   return (
@@ -551,6 +573,11 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
                 <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
               </>
             )}
+            <label style={{ ...fieldLabel, marginTop: 16 }}>Order date</label>
+            <input type="date" className="om-input" style={{ ...input, width: 170 }} value={orderDate} max={todayDateString()} onChange={(e) => setOrderDate(e.target.value)} />
+            {orderDate !== todayDateString() && (
+              <div style={{ fontSize: 12, color: C.ember, marginTop: 6 }}>This will be logged as a past order, not today's.</div>
+            )}
             <ErrorText>{error}</ErrorText>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
               {(tipAmount > 0 || creditToApply > 0) && (
@@ -596,6 +623,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [lines, setLines] = useState(orderToLines(order, menu));
   const [tip, setTip] = useState(order.tip ? String(order.tip) : "");
   const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
+  const [orderDate, setOrderDate] = useState(tsToDateString(order.ts || Date.now()));
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
@@ -621,7 +649,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onSave({ ...order, customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "" });
+    const res = await onSave({ ...order, customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -648,6 +676,8 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
       <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
       <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+      <label style={{ ...fieldLabel, marginTop: 16 }}>Order date</label>
+      <input type="date" className="om-input" style={{ ...input, width: 170 }} value={orderDate} max={todayDateString()} onChange={(e) => setOrderDate(e.target.value)} />
       <ErrorText>{error}</ErrorText>
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
         {tipAmount > 0 && (
@@ -718,7 +748,7 @@ function computeDailyBreakdown(orders) {
   const map = {};
   orders.forEach((o) => {
     const d = new Date(o.ts || Date.now());
-    const dateKey = d.toISOString().slice(0, 10); // YYYY-MM-DD, used for grouping and sorting
+    const dateKey = tsToDateString(d.getTime()); // local calendar date, consistent with the date picker
     if (!map[dateKey]) {
       map[dateKey] = {
         dateKey,
