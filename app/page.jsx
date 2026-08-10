@@ -735,6 +735,7 @@ function SalesBreakdown({ orders }) {
 }
 
 function AmountReceivedPicker({ order, onConfirm, onCancel }) {
+<<<<<<< HEAD
   const [amount, setAmount] = useState(String(order.amountReceived ?? order.total));
 =======
   const [amount, setAmount] = useState(String(order.total));
