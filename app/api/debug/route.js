@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { testTabWrite } from "../../../lib/sheets";
+import { getKey } from "../../../lib/kv";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +62,35 @@ export async function GET() {
     report.allRows = allErr
       ? { success: false, error: allErr.message }
       : { success: true, count: allData.length, keys: allData.map((r) => r.key) };
+
+    // 5. THE definitive test: call the exact same getKey() function the real
+    // app uses everywhere, on the exact "orders" key, and report precisely
+    // what it returns. If this shows real orders but the app's own screen
+    // shows none, the bug is in the app's frontend/state handling, not the
+    // database connection. If this ALSO shows nothing, the bug is in the
+    // database read itself, not the UI.
+    try {
+      const ordersViaGetKey = await getKey("orders", null);
+      report.ordersKeyTest = {
+        success: true,
+        foundViaRealGetKeyFunction: ordersViaGetKey !== null,
+        countViaRealGetKeyFunction: Array.isArray(ordersViaGetKey) ? ordersViaGetKey.length : typeof ordersViaGetKey,
+      };
+    } catch (err) {
+      report.ordersKeyTest = { success: false, error: err.message };
+    }
+
+    // 6. Raw direct query for the exact key "orders" -- catches any
+    // duplicate-row or whitespace-in-key issue that a key LISTING wouldn't
+    // surface clearly.
+    const { data: exactRows, error: exactErr } = await supabase.from("kv_store").select("key,value").eq("key", "orders");
+    report.ordersExactRowCheck = exactErr
+      ? { success: false, error: exactErr.message }
+      : {
+          success: true,
+          rowCountForExactKey: exactRows.length,
+          firstRowValueLength: exactRows[0] && Array.isArray(exactRows[0].value) ? exactRows[0].value.length : null,
+        };
   } catch (err) {
     report.error = err.message || String(err);
   }
