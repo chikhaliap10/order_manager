@@ -469,7 +469,7 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
       forPartner
         ? {
             id: uid(), customer: effectiveCustomer.trim(), items, tip: 0, total: itemsTotal,
-            paid: true, paymentMethod: settlement === "cash" ? "Cash" : "Cash",
+            paid: true, paymentMethod: settlement === "cash" ? "Cash" : INTERNAL_METHOD,
             collectedBy: settlement === "deduct" ? partnerId : "", ts: Date.now(),
           }
         : {
@@ -829,6 +829,7 @@ function AmountReceivedPicker({ order, onConfirm, onCancel }) {
 }
 
 const PAYMENT_METHODS = ["Cash", "Zelle", "Debit Card", "Credit Card"];
+const INTERNAL_METHOD = "Internal (deducted, no cash)";
 
 function CreditEditForm({ entry, onSave, onCancel }) {
   const [amount, setAmount] = useState(String(entry.amount));
@@ -932,7 +933,9 @@ function computePaymentTypeTotals(orders) {
     const method = o.paymentMethod || "Cash";
     map[method] = (map[method] || 0) + o.total;
   });
-  return PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m] }));
+  const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
+  const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
+  return [...realMethods, ...internal];
 }
 
 function PaymentTypeTotals({ orders }) {
@@ -941,12 +944,13 @@ function PaymentTypeTotals({ orders }) {
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Total by payment method</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Paid orders only</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Paid orders only — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {rows.map((r) => (
-          <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
-            <div style={{ fontSize: 12, color: C.muted }}>{r.method}</div>
-            <div style={{ ...displayNum, fontSize: 16, color: C.moss }}>{money(r.total)}</div>
+          <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${r.internal ? C.warning : C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 12, color: r.internal ? C.warning : C.muted }}>{r.method}</div>
+            <div style={{ ...displayNum, fontSize: 16, color: r.internal ? C.warning : C.moss }}>{money(r.total)}</div>
+            {r.internal && <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>Not real cash — excluded from reconciliation</div>}
           </div>
         ))}
       </div>
@@ -1065,6 +1069,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
                       <select className="om-input" style={{ ...input, width: "auto", padding: "4px 8px", fontSize: 12, marginTop: 0 }}
                         value={o.paymentMethod || "Cash"} onChange={(e) => onUpdate({ ...o, paymentMethod: e.target.value })}>
                         {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                        {o.paymentMethod === INTERNAL_METHOD && <option value={INTERNAL_METHOD}>{INTERNAL_METHOD}</option>}
                       </select>
                       {o.collectedBy ? (
                         <>
