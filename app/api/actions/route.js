@@ -25,6 +25,7 @@ export async function POST(req) {
         if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
         if (!Array.isArray(payload.items) || payload.items.length === 0) return badRequest("At least one item is required.");
         if (payload.tip !== undefined && Number(payload.tip) < 0) return badRequest("Tip cannot be negative.");
+        if (payload.creditApplied !== undefined && Number(payload.creditApplied) < 0) return badRequest("Applied credit cannot be negative.");
         if (payload.items.some((i) => !(Number(i.price) > 0))) return badRequest("Each item's price must be greater than 0.");
       }
 
@@ -133,6 +134,24 @@ export async function POST(req) {
       }
       await setKey("partners", partners);
       return Response.json({ partners });
+    }
+
+    // ---------- CUSTOMER CREDITS ----------
+    // A simple ledger, not folded into income/expense math -- this tracks
+    // money the business owes back to a customer (positive amounts) or
+    // credit that's been applied to reduce what they owe on a later order
+    // (negative amounts). A customer's current balance is just the sum of
+    // their entries.
+    if (resource === "credits") {
+      if (action === "create") {
+        if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
+        if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
+        let credits = await getKey("credits", []);
+        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", ts: Date.now() }, ...credits];
+        await setKey("credits", credits);
+        return Response.json({ credits });
+      }
+      return Response.json({ error: "unknown action" }, { status: 400 });
     }
 
     return Response.json({ error: "unknown resource" }, { status: 400 });

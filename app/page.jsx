@@ -91,6 +91,7 @@ export default function HomePage() {
   const [orders, setOrders] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
+  const [credits, setCredits] = useState([]);
   const [tab, setTab] = useState("orders");
 
   const refresh = async () => {
@@ -100,7 +101,7 @@ export default function HomePage() {
       if (data.authed) {
         setUnlocked(true);
         setMenu(data.menu); setPartners(data.partners); setOrders(data.orders);
-        setExpenses(data.expenses); setWithdrawals(data.withdrawals);
+        setExpenses(data.expenses); setWithdrawals(data.withdrawals); setCredits(data.credits || []);
       } else {
         setUnlocked(false);
       }
@@ -143,6 +144,7 @@ export default function HomePage() {
       if (res.withdrawals) setWithdrawals(res.withdrawals);
       if (res.menu) setMenu(res.menu);
       if (res.partners) setPartners(res.partners);
+      if (res.credits) setCredits(res.credits);
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err.message || "Something went wrong. Please try again." };
@@ -168,7 +170,9 @@ export default function HomePage() {
       // they fronted business money personally, so it's credited back.
       paidExpensesByPartner[p.id] = expenses.filter((e) => e.paidBy === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
     });
-    return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner, collectedByPartner, paidExpensesByPartner };
+    const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
+    const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
+    return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, expensePercent, profitPercent };
   }, [orders, expenses, withdrawals, partners]);
 
   const GlobalStyle = () => (
@@ -262,14 +266,16 @@ export default function HomePage() {
 
       <div key={tab} className="om-fade">
         {tab === "orders" && (
-          <NewOrderTab menu={menu}
-            onCreate={(order) => act("order", "create", order)} />
+          <NewOrderTab menu={menu} credits={credits}
+            onCreate={(order) => act("order", "create", order)}
+            onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
           <OrderHistoryTab menu={menu} orders={orders} partners={partners}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onUpdate={(order) => act("order", "update", order)}
-            onDelete={(id) => act("order", "delete", { id })} />
+            onDelete={(id) => act("order", "delete", { id })}
+            onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "expenses" && (
           <ExpensesTab expenses={expenses} partners={partners}
@@ -303,8 +309,8 @@ function SummaryStrip({ totals }) {
   const items = [
     { label: "Income (paid)", value: totals.income, color: C.success },
     { label: "Pending", value: totals.pending, color: C.warning },
-    { label: "Expenses", value: totals.expenseTotal, color: C.danger },
-    { label: "Net profit", value: totals.netProfit, color: C.moss },
+    { label: "Expenses", value: totals.expenseTotal, color: C.danger, sub: totals.income > 0 ? `${totals.expensePercent.toFixed(1)}% of income` : null },
+    { label: "Net profit", value: totals.netProfit, color: C.moss, sub: totals.income > 0 ? `${totals.profitPercent.toFixed(1)}% margin` : null },
   ];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, marginBottom: 26 }}>
@@ -312,6 +318,7 @@ function SummaryStrip({ totals }) {
         <div key={it.label} style={{ ...statCard, borderTop: `3px solid ${it.color}` }}>
           <div style={statLabel}>{it.label}</div>
           <div style={{ ...statValue, color: it.color }}>{money(it.value)}</div>
+          {it.sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>{it.sub}</div>}
         </div>
       ))}
     </div>
@@ -408,9 +415,16 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
 function firstVariant(item) { return item?.variants?.[0]; }
 function firstItem(group) { return group?.items?.[0]; }
 
-function NewOrderTab({ menu, onCreate }) {
+function creditBalanceFor(credits, customerName) {
+  const key = customerName.trim().toLowerCase();
+  if (!key) return 0;
+  return credits.filter((c) => c.customer.trim().toLowerCase() === key).reduce((s, c) => s + Number(c.amount || 0), 0);
+}
+
+function NewOrderTab({ menu, credits, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
   const [tip, setTip] = useState("");
+  const [applyCredit, setApplyCredit] = useState(false);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const makeLine = () => {
@@ -428,7 +442,10 @@ function NewOrderTab({ menu, onCreate }) {
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = Number(tip) || 0;
-  const orderTotal = subtotal + tipAmount;
+  const preTotal = subtotal + tipAmount;
+  const availableCredit = creditBalanceFor(credits, customer);
+  const creditToApply = applyCredit && availableCredit > 0 ? Math.min(availableCredit, preTotal) : 0;
+  const orderTotal = preTotal - creditToApply;
 
   const submit = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
@@ -441,10 +458,16 @@ function NewOrderTab({ menu, onCreate }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onCreate({ id: uid(), customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, paid: false, ts: Date.now() });
+    const res = await onCreate({
+      id: uid(), customer: customer.trim(), items, tip: tipAmount,
+      creditApplied: creditToApply, total: itemsTotal + tipAmount - creditToApply, paid: false, ts: Date.now(),
+    });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    setCustomer(""); setTip(""); setLines([makeLine()]);
+    if (creditToApply > 0) {
+      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
+    }
+    setCustomer(""); setTip(""); setApplyCredit(false); setLines([makeLine()]);
   };
 
   return (
@@ -456,7 +479,16 @@ function NewOrderTab({ menu, onCreate }) {
         ) : (
           <>
             <label style={fieldLabel}>Customer name</label>
-            <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
+            <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); setApplyCredit(false); }} />
+            {availableCredit > 0 && (
+              <div style={{ marginTop: 8, padding: "8px 12px", background: C.emberTint, borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                <span style={{ fontSize: 13, color: C.ember }}>{customer.trim()} has {money(availableCredit)} credit available</span>
+                <button onClick={() => setApplyCredit((v) => !v)} className="om-btn"
+                  style={{ fontSize: 12, padding: "4px 10px", borderRadius: 999, border: `1px solid ${C.ember}`, background: applyCredit ? C.ember : "transparent", color: applyCredit ? "#FAF6EE" : C.ember, cursor: "pointer" }}>
+                  {applyCredit ? "Applying credit ✓" : "Apply credit"}
+                </button>
+              </div>
+            )}
             <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
               {lines.map((l) => (
                 <OrderLineRow key={l.id} line={l} menu={menu} onChange={updateLine} onRemove={() => removeLine(l.id)} removable={lines.length > 1} />
@@ -467,9 +499,11 @@ function NewOrderTab({ menu, onCreate }) {
             <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
             <ErrorText>{error}</ErrorText>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-              {tipAmount > 0 && (
+              {(tipAmount > 0 || creditToApply > 0) && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.muted, marginBottom: 6 }}>
-                  <span>Subtotal {money(subtotal)} + tip {money(tipAmount)}</span>
+                  <span>
+                    Subtotal {money(subtotal)}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{creditToApply > 0 ? ` − credit ${money(creditToApply)}` : ""}
+                  </span>
                 </div>
               )}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -623,9 +657,57 @@ function computeItemBreakdown(orders) {
   return Object.values(map).sort((a, b) => b.revenue - a.revenue);
 }
 
+function computeDailyBreakdown(orders) {
+  const map = {};
+  orders.forEach((o) => {
+    const d = new Date(o.ts || Date.now());
+    const dateKey = d.toISOString().slice(0, 10); // YYYY-MM-DD, used for grouping and sorting
+    if (!map[dateKey]) {
+      map[dateKey] = {
+        dateKey,
+        label: d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
+        plates: 0,
+        revenue: 0,
+      };
+    }
+    (o.items || []).forEach((i) => {
+      map[dateKey].plates += Number(i.qty) || 0;
+      map[dateKey].revenue += (Number(i.price) || 0) * (Number(i.qty) || 0);
+    });
+  });
+  // Most recent date first. Days with zero orders simply never get a key here,
+  // so nothing needs to be manually filtered out or entered.
+  return Object.values(map).sort((a, b) => b.dateKey.localeCompare(a.dateKey));
+}
+
+function DailyBreakdown({ orders }) {
+  const rows = computeDailyBreakdown(orders);
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Plates sold by day</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Only shows days that actually had orders</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {rows.map((r) => (
+          <div key={r.dateKey} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 14, fontWeight: 500 }}>{r.label}</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+              <span style={{ fontSize: 13, color: C.muted }}>{r.plates} plate{r.plates === 1 ? "" : "s"}</span>
+              <span style={{ fontSize: 12, color: C.muted }}>avg {money(r.plates > 0 ? r.revenue / r.plates : 0)}/plate</span>
+              <span style={{ ...displayNum, fontSize: 14, color: C.moss }}>{money(r.revenue)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SalesBreakdown({ orders }) {
   const rows = computeItemBreakdown(orders);
   if (rows.length === 0) return null;
+  const totalQty = rows.reduce((s, r) => s + r.qty, 0);
+  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Plates sold by item</div>
@@ -640,14 +722,55 @@ function SalesBreakdown({ orders }) {
             </div>
           </div>
         ))}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0 0" }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>Total, all categories</div>
+          <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>{totalQty} plate{totalQty === 1 ? "" : "s"}</span>
+            <span style={{ ...displayNum, fontSize: 15, color: C.ember }}>{money(totalRevenue)}</span>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDelete }) {
+function AmountReceivedPicker({ order, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState(String(order.total));
+  const [submitting, setSubmitting] = useState(false);
+  const change = Math.max(0, (Number(amount) || 0) - order.total);
+
+  const confirm = async () => {
+    setSubmitting(true);
+    await onConfirm(Number(amount) || 0);
+    setSubmitting(false);
+  };
+
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.ember}` }}>
+      <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>{order.customer} — bill is {money(order.total)}</div>
+      <label style={fieldLabel}>Amount actually received</label>
+      <input type="number" step="0.01" min="0" className="om-input" style={input} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
+      {change > 0 && (
+        <div style={{ fontSize: 13, color: C.ember, marginTop: 8 }}>
+          They overpaid by {money(change)} — this will be tracked as credit for {order.customer}, to apply toward a future order.
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const PAYMENT_METHODS = ["Cash", "Zelle", "Debit Card", "Credit Card"];
+
+function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDelete, onAddCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
+  const [recordingAmountId, setRecordingAmountId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
   const [returningId, setReturningId] = useState(null);
 
@@ -663,10 +786,20 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
     setReturningId(null);
   };
 
+  const recordAmountReceived = async (order, amountReceived) => {
+    const change = Math.max(0, amountReceived - order.total);
+    await onUpdate({ ...order, amountReceived });
+    if (change > 0) {
+      await onAddCredit({ customer: order.customer, amount: change, note: `Overpayment on order for ${order.customer}` });
+    }
+    setRecordingAmountId(null);
+  };
+
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
 
   return (
     <div>
+      <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
       <div style={{ ...sectionTitle, marginTop: 18 }}>{orders.length} order{orders.length === 1 ? "" : "s"} recorded</div>
@@ -683,6 +816,10 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
               <CollectorPicker key={o.id} order={o} partners={partners}
                 onConfirm={async (collectedBy) => { await onUpdate({ ...o, collectedBy }); setPickingCollectorId(null); }}
                 onCancel={() => setPickingCollectorId(null)} />
+            ) : recordingAmountId === o.id ? (
+              <AmountReceivedPicker key={o.id} order={o}
+                onConfirm={(amt) => recordAmountReceived(o, amt)}
+                onCancel={() => setRecordingAmountId(null)} />
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -691,7 +828,11 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
                   {o.paid && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                      <select className="om-input" style={{ ...input, width: "auto", padding: "4px 8px", fontSize: 12, marginTop: 0 }}
+                        value={o.paymentMethod || "Cash"} onChange={(e) => onUpdate({ ...o, paymentMethod: e.target.value })}>
+                        {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
                       {o.collectedBy ? (
                         <>
                           <span style={{ fontSize: 12, color: C.ember }}>Collected by {partnerName(o.collectedBy) || "Unknown"}</span>
@@ -705,6 +846,9 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onUpdate, onDel
                           A partner collected this cash instead of shared?
                         </button>
                       )}
+                      <button onClick={() => setRecordingAmountId(o.id)} className="om-btn" style={quickTagBtn}>
+                        Paid more than the bill?
+                      </button>
                     </div>
                   )}
                 </div>

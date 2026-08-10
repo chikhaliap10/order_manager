@@ -11,15 +11,16 @@ export async function GET() {
       return Response.json({ authed: false });
     }
 
-    const [menu, partners, orders, expenses, withdrawals] = await Promise.all([
+    const [menu, partners, orders, expenses, withdrawals, credits] = await Promise.all([
       getOrInitMenu(),
       getOrInitPartners(),
       getKey("orders", []),
       getKey("expenses", []),
       getKey("withdrawals", []),
+      getKey("credits", []),
     ]);
 
-    return Response.json({ authed: true, menu, partners, orders, expenses, withdrawals });
+    return Response.json({ authed: true, menu, partners, orders, expenses, withdrawals, credits });
   } catch (err) {
     console.error("State load failed:", err);
     return Response.json({ error: err.message || "Could not load app data." }, { status: 500 });
