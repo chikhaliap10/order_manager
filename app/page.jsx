@@ -266,7 +266,7 @@ export default function HomePage() {
 
       <div key={tab} className="om-fade">
         {tab === "orders" && (
-          <NewOrderTab menu={menu} credits={credits}
+          <NewOrderTab menu={menu} partners={partners} credits={credits}
             onCreate={(order) => act("order", "create", order)}
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
@@ -423,10 +423,13 @@ function creditBalanceFor(credits, customerName) {
   return credits.filter((c) => c.customer.trim().toLowerCase() === key).reduce((s, c) => s + Number(c.amount || 0), 0);
 }
 
-function NewOrderTab({ menu, credits, onCreate, onAddCredit }) {
+function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
+  const [forPartner, setForPartner] = useState(false);
+  const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
+  const [settlement, setSettlement] = useState("deduct"); // deduct | cash
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const makeLine = () => {
@@ -443,14 +446,15 @@ function NewOrderTab({ menu, credits, onCreate, onAddCredit }) {
   const linePrice = (l) => (l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0));
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
-  const tipAmount = Number(tip) || 0;
+  const tipAmount = forPartner ? 0 : Number(tip) || 0;
   const preTotal = subtotal + tipAmount;
-  const availableCredit = creditBalanceFor(credits, customer);
+  const effectiveCustomer = forPartner ? (partners.find((p) => p.id === partnerId)?.name || "") : customer;
+  const availableCredit = forPartner ? 0 : creditBalanceFor(credits, customer);
   const creditToApply = applyCredit && availableCredit > 0 ? Math.min(availableCredit, preTotal) : 0;
   const orderTotal = preTotal - creditToApply;
 
   const submit = async () => {
-    if (!customer.trim()) { setError("Customer name is required."); return; }
+    if (!effectiveCustomer.trim()) { setError(forPartner ? "Choose a partner." : "Customer name is required."); return; }
     const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
       const it = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
       const v = getVariant(l);
@@ -460,16 +464,25 @@ function NewOrderTab({ menu, credits, onCreate, onAddCredit }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onCreate({
-      id: uid(), customer: customer.trim(), items, tip: tipAmount,
-      creditApplied: creditToApply, total: itemsTotal + tipAmount - creditToApply, paid: false, ts: Date.now(),
-    });
+    const finalTotal = itemsTotal + tipAmount - creditToApply;
+    const res = await onCreate(
+      forPartner
+        ? {
+            id: uid(), customer: effectiveCustomer.trim(), items, tip: 0, total: itemsTotal,
+            paid: true, paymentMethod: settlement === "cash" ? "Cash" : "Cash",
+            collectedBy: settlement === "deduct" ? partnerId : "", ts: Date.now(),
+          }
+        : {
+            id: uid(), customer: customer.trim(), items, tip: tipAmount,
+            creditApplied: creditToApply, total: finalTotal, paid: false, ts: Date.now(),
+          }
+    );
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    if (creditToApply > 0) {
+    if (!forPartner && creditToApply > 0) {
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setLines([makeLine()]);
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setLines([makeLine()]);
   };
 
   return (
@@ -480,25 +493,64 @@ function NewOrderTab({ menu, credits, onCreate, onAddCredit }) {
           <div style={{ color: C.muted, fontSize: 14 }}>Add categories and items in Setup first.</div>
         ) : (
           <>
-            <label style={fieldLabel}>Customer name</label>
-            <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); setApplyCredit(false); }} />
-            {availableCredit > 0 && (
-              <div style={{ marginTop: 8, padding: "8px 12px", background: C.emberTint, borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-                <span style={{ fontSize: 13, color: C.ember }}>{customer.trim()} has {money(availableCredit)} credit available</span>
-                <button onClick={() => setApplyCredit((v) => !v)} className="om-btn"
-                  style={{ fontSize: 12, padding: "4px 10px", borderRadius: 999, border: `1px solid ${C.ember}`, background: applyCredit ? C.ember : "transparent", color: applyCredit ? "#FAF6EE" : C.ember, cursor: "pointer" }}>
-                  {applyCredit ? "Applying credit ✓" : "Apply credit"}
-                </button>
-              </div>
+            {partners.length > 0 && (
+              <button onClick={() => setForPartner((v) => !v)} className="om-btn"
+                style={{ ...quickTagBtn, marginBottom: 12, background: forPartner ? C.ember : "transparent", color: forPartner ? "#FAF6EE" : C.ember }}>
+                {forPartner ? "✓ " : ""}This order is for a partner (staff meal)
+              </button>
             )}
+
+            {forPartner ? (
+              <>
+                <label style={fieldLabel}>Which partner?</label>
+                <select className="om-input" style={input} value={partnerId} onChange={(e) => setPartnerId(e.target.value)}>
+                  {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                <label style={{ ...fieldLabel, marginTop: 12 }}>How is this being settled?</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setSettlement("deduct")} className="om-btn"
+                    style={{ ...qtyPreset, flex: 1, ...(settlement === "deduct" ? qtyPresetActive : {}) }}>
+                    Deduct from their share
+                  </button>
+                  <button onClick={() => setSettlement("cash")} className="om-btn"
+                    style={{ ...qtyPreset, flex: 1, ...(settlement === "cash" ? qtyPresetActive : {}) }}>
+                    They're paying cash
+                  </button>
+                </div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.4 }}>
+                  {settlement === "deduct"
+                    ? "This won't add cash to the till — it comes straight off their partner balance, same as if they'd taken the cash themselves."
+                    : "This is treated like a normal cash sale — the till goes up by the full amount, same as any other customer."}
+                </div>
+              </>
+            ) : (
+              <>
+                <label style={fieldLabel}>Customer name</label>
+                <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); setApplyCredit(false); }} />
+                {availableCredit > 0 && (
+                  <div style={{ marginTop: 8, padding: "8px 12px", background: C.emberTint, borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                    <span style={{ fontSize: 13, color: C.ember }}>{customer.trim()} has {money(availableCredit)} credit available</span>
+                    <button onClick={() => setApplyCredit((v) => !v)} className="om-btn"
+                      style={{ fontSize: 12, padding: "4px 10px", borderRadius: 999, border: `1px solid ${C.ember}`, background: applyCredit ? C.ember : "transparent", color: applyCredit ? "#FAF6EE" : C.ember, cursor: "pointer" }}>
+                      {applyCredit ? "Applying credit ✓" : "Apply credit"}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
             <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
               {lines.map((l) => (
                 <OrderLineRow key={l.id} line={l} menu={menu} onChange={updateLine} onRemove={() => removeLine(l.id)} removable={lines.length > 1} />
               ))}
             </div>
             <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
-            <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
-            <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+            {!forPartner && (
+              <>
+                <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
+                <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+              </>
+            )}
             <ErrorText>{error}</ErrorText>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
               {(tipAmount > 0 || creditToApply > 0) && (
@@ -874,12 +926,43 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
   );
 }
 
+function computePaymentTypeTotals(orders) {
+  const map = {};
+  orders.filter((o) => o.paid).forEach((o) => {
+    const method = o.paymentMethod || "Cash";
+    map[method] = (map[method] || 0) + o.total;
+  });
+  return PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m] }));
+}
+
+function PaymentTypeTotals({ orders }) {
+  const rows = computePaymentTypeTotals(orders);
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Total by payment method</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Paid orders only</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+        {rows.map((r) => (
+          <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 12, color: C.muted }}>{r.method}</div>
+            <div style={{ ...displayNum, fontSize: 16, color: C.moss }}>{money(r.total)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpdate, onDelete, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
   const [returningId, setReturningId] = useState(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all"); // all | paid | unpaid
+  const [methodFilter, setMethodFilter] = useState("all"); // all | Cash | Zelle | Debit Card | Credit Card
 
   const handleToggle = async (id) => {
     setTogglingId(id);
@@ -910,18 +993,54 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
 
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
 
+  const filteredOrders = orders.filter((o) => {
+    if (search.trim() && !o.customer.toLowerCase().includes(search.trim().toLowerCase())) return false;
+    if (statusFilter === "paid" && !o.paid) return false;
+    if (statusFilter === "unpaid" && o.paid) return false;
+    if (methodFilter !== "all" && (o.paymentMethod || "Cash") !== methodFilter) return false;
+    return true;
+  });
+
   return (
     <div>
       <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} />
+      <PaymentTypeTotals orders={orders} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
-      <div style={{ ...sectionTitle, marginTop: 18 }}>{orders.length} order{orders.length === 1 ? "" : "s"} recorded</div>
+
+      <div style={{ ...card, marginTop: 18, marginBottom: 18 }}>
+        <label style={fieldLabel}>Search by customer name</label>
+        <input className="om-input" style={input} placeholder="e.g. Ramesh" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <label style={fieldLabel}>Status</label>
+            <select className="om-input" style={input} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="all">All</option>
+              <option value="paid">Paid</option>
+              <option value="unpaid">Unpaid</option>
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <label style={fieldLabel}>Payment method</label>
+            <select className="om-input" style={input} value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)}>
+              <option value="all">All</option>
+              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ ...sectionTitle, marginTop: 18 }}>
+        {filteredOrders.length} of {orders.length} order{orders.length === 1 ? "" : "s"} shown
+      </div>
       {orders.length === 0 ? (
         <div style={emptyState}>No orders yet — add one from the New order tab.</div>
+      ) : filteredOrders.length === 0 ? (
+        <div style={emptyState}>No orders match your search/filters.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {orders.map((o) =>
+          {filteredOrders.map((o) =>
             editingId === o.id ? (
               <OrderEditForm key={o.id} order={o} menu={menu} partners={partners}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
@@ -958,6 +1077,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
                       ) : (
                         <button onClick={() => setPickingCollectorId(o.id)} className="om-btn" style={quickTagBtn}>
                           A partner collected this cash instead of shared?
+
                         </button>
                       )}
                       <button onClick={() => setRecordingAmountId(o.id)} className="om-btn" style={quickTagBtn}>
