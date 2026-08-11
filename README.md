@@ -210,6 +210,28 @@ setup to confirm it's working without waiting an hour.
 
 ---
 
+---
+
+## Customer order form (new)
+
+Your site now has a second page, `/order`, with no passcode -- anyone with
+the link can place an order there. It's meant to be shared directly with
+customers (a text, a QR code taped at the counter, etc.).
+
+- **Setup tab** has your shareable link and a downloadable QR code.
+- Customer-placed orders land in a new **Incoming** tab (with a red count
+  badge) -- they do **not** appear in Order History or count toward any
+  totals until you tap **"Move to Order History"** on that order's tile.
+- Once moved, it behaves exactly like any other order, with a small
+  "Placed online" tag so you can always tell where it came from.
+- Prices are always looked up fresh from your real menu on the server --
+  a customer (or a bot) can never submit a tampered price.
+- Built-in spam protection: a visitor is limited to 3 orders per 10
+  minutes, and a hidden field silently catches basic bots without
+  bothering real customers.
+
+---
+
 ## Notes on how this is built
 
 - The passcode is intentionally simple (one shared code, not individual

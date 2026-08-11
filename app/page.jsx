@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil } from "lucide-react";
+import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox } from "lucide-react";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -171,9 +171,16 @@ export default function HomePage() {
     }
   };
 
+  // Orders placed online but not yet reviewed by staff (still sitting in the
+  // Incoming tab) are deliberately excluded from every business number --
+  // income, profit, sales breakdowns, partner shares -- until a real person
+  // confirms them. This also protects against spam/junk submissions ever
+  // touching the real books.
+  const visibleOrders = useMemo(() => orders.filter((o) => !(o.source === "online" && !o.reviewed)), [orders]);
+
   const totals = useMemo(() => {
-    const income = orders.filter((o) => o.paid).reduce((s, o) => s + o.total, 0);
-    const pending = orders.filter((o) => !o.paid).reduce((s, o) => s + o.total, 0);
+    const income = visibleOrders.filter((o) => o.paid).reduce((s, o) => s + o.total, 0);
+    const pending = visibleOrders.filter((o) => !o.paid).reduce((s, o) => s + o.total, 0);
     const expenseTotal = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
     const netProfit = income - expenseTotal;
     const share = partners.length ? netProfit / partners.length : 0;
@@ -185,7 +192,7 @@ export default function HomePage() {
       // Cash a partner personally collected from a paid order is money
       // they're already holding -- it counts against their balance exactly
       // like a withdrawal would, even though no formal withdrawal was made.
-      collectedByPartner[p.id] = orders.filter((o) => o.paid && o.collectedBy === p.id).reduce((s, o) => s + o.total, 0);
+      collectedByPartner[p.id] = visibleOrders.filter((o) => o.paid && o.collectedBy === p.id).reduce((s, o) => s + o.total, 0);
       // Expenses a partner paid out of their own pocket are the opposite --
       // they fronted business money personally, so it's credited back.
       paidExpensesByPartner[p.id] = expenses.filter((e) => e.paidBy === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
@@ -193,7 +200,7 @@ export default function HomePage() {
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
     return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, expensePercent, profitPercent };
-  }, [orders, expenses, withdrawals, partners]);
+  }, [visibleOrders, expenses, withdrawals, partners]);
 
   const GlobalStyle = () => (
     <style>{`
@@ -255,7 +262,10 @@ export default function HomePage() {
     );
   }
 
+  const incomingCount = orders.filter((o) => o.source === "online" && !o.reviewed).length;
+
   const tabs = [
+    { id: "incoming", label: "Incoming", icon: Inbox, badge: incomingCount },
     { id: "orders", label: "New order", icon: Receipt },
     { id: "history", label: "Order history", icon: History },
     { id: "expenses", label: "Expenses", icon: Wallet },
@@ -276,8 +286,13 @@ export default function HomePage() {
       <div style={tabRow}>
         {tabs.map((t) => (
           <button key={t.id} onClick={() => setTab(t.id)} className="om-btn"
-            style={{ ...tabBtn, background: tab === t.id ? C.moss : "transparent", color: tab === t.id ? "#FAF6EE" : C.muted }}>
+            style={{ ...tabBtn, background: tab === t.id ? C.moss : "transparent", color: tab === t.id ? "#FAF6EE" : C.muted, position: "relative" }}>
             <t.icon size={15} /> {t.label}
+            {t.badge > 0 && (
+              <span style={{ background: C.ember, color: "#FAF6EE", fontSize: 11, fontWeight: 700, borderRadius: 999, minWidth: 18, height: 18, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 5px" }}>
+                {t.badge}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -285,13 +300,18 @@ export default function HomePage() {
       <SummaryStrip totals={totals} />
 
       <div key={tab} className="om-fade">
+        {tab === "incoming" && (
+          <IncomingOrdersTab orders={orders}
+            onMoveToHistory={(id) => act("order", "update", { ...orders.find((o) => o.id === id), reviewed: true })}
+            onDelete={(id) => act("order", "delete", { id })} />
+        )}
         {tab === "orders" && (
-          <NewOrderTab menu={menu} partners={partners} credits={credits} orders={orders}
+          <NewOrderTab menu={menu} partners={partners} credits={credits} orders={visibleOrders}
             onCreate={(order) => act("order", "create", order)}
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={orders} partners={partners} credits={credits}
+          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })}
@@ -322,6 +342,55 @@ export default function HomePage() {
             onRemoveItem={(groupId, itemId) => act("menu", "remove-item", { groupId, itemId })}
             onRenamePartner={(id, name) => act("partners", "rename", { id, name })} />
         )}
+      </div>
+    </div>
+  );
+}
+
+function IncomingOrdersTab({ orders, onMoveToHistory, onDelete }) {
+  const [movingId, setMovingId] = useState(null);
+  const incoming = orders.filter((o) => o.source === "online" && !o.reviewed).sort((a, b) => a.ts - b.ts); // oldest first, first-come-first-served
+
+  const move = async (id) => {
+    setMovingId(id);
+    await onMoveToHistory(id);
+    setMovingId(null);
+  };
+
+  if (incoming.length === 0) {
+    return (
+      <div style={emptyState}>
+        No new orders from customers right now. Share your order link or QR code (in Setup) to start taking online orders.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ ...sectionTitle, marginBottom: 14 }}>{incoming.length} new order{incoming.length === 1 ? "" : "s"} waiting</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+        {incoming.map((o) => (
+          <div key={o.id} style={{ ...card, borderLeft: `4px solid ${C.ember}`, padding: 20 }}>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>{o.customer}</div>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
+              {new Date(o.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
+              {o.items.map((i, idx) => (
+                <div key={idx} style={{ fontSize: 15 }}>
+                  <span style={{ fontWeight: 700, color: C.ember }}>{i.qty}×</span> {i.name}{i.variantLabel ? ` (${i.variantLabel})` : ""}
+                </div>
+              ))}
+            </div>
+            <div style={{ ...displayNum, fontSize: 18, color: C.moss, marginBottom: 14 }}>{money(o.total)}</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => move(o.id)} disabled={movingId === o.id} style={{ ...primaryBtn, marginTop: 0, opacity: movingId === o.id ? 0.7 : 1 }} className="om-btn">
+                {movingId === o.id ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} Move to Order History
+              </button>
+              <ConfirmDelete label="incoming order" onConfirm={() => onDelete(o.id)} />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1154,7 +1223,12 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontWeight: 600, fontSize: 15 }}>{o.customer}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ fontWeight: 600, fontSize: 15 }}>{o.customer}</div>
+                    {o.source === "online" && (
+                      <span style={{ fontSize: 10, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px" }}>Placed online</span>
+                    )}
+                  </div>
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
@@ -1672,6 +1746,55 @@ function PartnerNameInput({ partner, index, onRenamePartner }) {
   );
 }
 
+function CustomerOrderLinkCard() {
+  const [link, setLink] = useState("");
+  const [qrDataUrl, setQrDataUrl] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const url = `${window.location.origin}/order`;
+    setLink(url);
+    import("qrcode").then((QRCode) => {
+      QRCode.toDataURL(url, { width: 260, margin: 1, color: { dark: "#121412", light: "#F0EDE6" } })
+        .then(setQrDataUrl)
+        .catch(() => setQrDataUrl(null));
+    });
+  }, []);
+
+  const copyLink = () => {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(link);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Customer order link</div>
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>
+        Share this link (or the QR code) so customers can place their own orders. They show up in the{" "}
+        <strong>Incoming</strong> tab for you to review before they're added to Order History.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <input readOnly className="om-input" style={{ ...input, flex: 1, minWidth: 200 }} value={link} onFocus={(e) => e.target.select()} />
+        <button onClick={copyLink} style={{ ...primaryBtn, width: "auto", marginTop: 0 }} className="om-btn">
+          {copied ? <Check size={15} /> : null} {copied ? "Copied!" : "Copy link"}
+        </button>
+      </div>
+      {qrDataUrl && (
+        <div style={{ textAlign: "center" }}>
+          <img src={qrDataUrl} alt="QR code for the customer order link" style={{ borderRadius: 12, border: `1px solid ${C.border}` }} />
+          <div style={{ marginTop: 10 }}>
+            <a href={qrDataUrl} download="surti-aloopuri-order-qr.png" style={{ fontSize: 13, color: C.ember }}>Download QR code to print</a>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner }) {
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
@@ -1689,6 +1812,7 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, on
 
   return (
     <div>
+      <CustomerOrderLinkCard />
       <div style={{ ...card, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={cardTitle}>Backup your data</div>
