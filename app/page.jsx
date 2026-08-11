@@ -286,7 +286,7 @@ export default function HomePage() {
 
       <div key={tab} className="om-fade">
         {tab === "orders" && (
-          <NewOrderTab menu={menu} partners={partners} credits={credits}
+          <NewOrderTab menu={menu} partners={partners} credits={credits} orders={orders}
             onCreate={(order) => act("order", "create", order)}
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
@@ -443,7 +443,60 @@ function creditBalanceFor(credits, customerName) {
   return credits.filter((c) => c.customer.trim().toLowerCase() === key).reduce((s, c) => s + Number(c.amount || 0), 0);
 }
 
-function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
+function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeholder }) {
+  const [focused, setFocused] = useState(false);
+  const blurTimeoutRef = useRef(null);
+
+  const suggestions = useMemo(() => {
+    const query = value.trim().toLowerCase();
+    if (!query) return [];
+    const matches = pastNames.filter((n) => n.toLowerCase().includes(query) && n.toLowerCase() !== query);
+    return matches
+      .map((n) => ({ name: n, credit: creditBalanceFor(credits, n) }))
+      .sort((a, b) => b.credit - a.credit || a.name.localeCompare(b.name))
+      .slice(0, 6);
+  }, [value, pastNames, credits]);
+
+  const pick = (name) => {
+    clearTimeout(blurTimeoutRef.current);
+    onChange(name);
+    setFocused(false);
+  };
+
+  return (
+    <div style={{ position: "relative" }}>
+      <input
+        className="om-input" style={input} placeholder={placeholder} value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => { blurTimeoutRef.current = setTimeout(() => setFocused(false), 150); }}
+      />
+      {focused && suggestions.length > 0 && (
+        <div style={{
+          position: "absolute", top: "100%", left: 0, right: 0, marginTop: 4, zIndex: 20,
+          background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+          boxShadow: "0 4px 16px rgba(0,0,0,0.4)", overflow: "hidden",
+        }}>
+          {suggestions.map((s) => (
+            <div
+              key={s.name}
+              onMouseDown={() => pick(s.name)}
+              style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "9px 12px", cursor: "pointer", borderBottom: `1px solid ${C.border}`, fontSize: 14,
+              }}
+            >
+              <span>{s.name}</span>
+              {s.credit > 0 && <span style={{ fontSize: 12, color: C.ember, fontWeight: 600 }}>{money(s.credit)} credit</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
@@ -453,6 +506,11 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
   const [orderDate, setOrderDate] = useState(todayDateString());
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const pastCustomerNames = useMemo(() => {
+    const names = new Set();
+    orders.forEach((o) => { if (o.customer?.trim()) names.add(o.customer.trim()); });
+    return [...names];
+  }, [orders]);
   const makeLine = () => {
     const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
     return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" };
@@ -548,7 +606,13 @@ function NewOrderTab({ menu, partners, credits, onCreate, onAddCredit }) {
             ) : (
               <>
                 <label style={fieldLabel}>Customer name</label>
-                <input className="om-input" style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); setApplyCredit(false); }} />
+                <CustomerNameAutocomplete
+                  value={customer}
+                  onChange={(v) => { setCustomer(v); setError(""); setApplyCredit(false); }}
+                  pastNames={pastCustomerNames}
+                  credits={credits}
+                  placeholder="e.g. Ramesh"
+                />
                 {availableCredit > 0 && (
                   <div style={{ marginTop: 8, padding: "8px 12px", background: C.emberTint, borderRadius: 10, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                     <span style={{ fontSize: 13, color: C.ember }}>{customer.trim()} has {money(availableCredit)} credit available</span>
