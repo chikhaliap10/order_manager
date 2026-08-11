@@ -133,6 +133,15 @@ export default function HomePage() {
 
   useEffect(() => { refresh(); }, []);
 
+  // Keep the app's data reasonably fresh automatically -- this is what
+  // makes new customer-placed orders show up in Incoming without staff
+  // needing to manually reload the page.
+  useEffect(() => {
+    if (!unlocked) return;
+    const interval = setInterval(() => { refresh(); }, 20000);
+    return () => clearInterval(interval);
+  }, [unlocked]);
+
   const handleUnlock = async () => {
     if (!passInput.trim()) { setPassError("Enter the passcode"); return; }
     setUnlocking(true);
@@ -419,26 +428,43 @@ function SummaryStrip({ totals }) {
 function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
-  const hasVariants = item && item.variants.length > 1;
-  const variant = item?.variants.find((v) => v.id === line.variantId);
-  const price = line.price !== undefined && line.price !== "" ? Number(line.price) : (variant?.price || 0);
+  const isAddOnItem = Boolean(item?.addOnMode);
+
+  const hasVariants = !isAddOnItem && item && item.variants.length > 1;
+  const variant = !isAddOnItem ? item?.variants.find((v) => v.id === line.variantId) : null;
+  const price = isAddOnItem
+    ? computeAddOnLinePrice(item, line.style || "Regular", line.sevOptionId, line.selectedAddOnIds || [])
+    : (line.price !== undefined && line.price !== "" ? Number(line.price) : (variant?.price || 0));
   const total = price * (Number(line.qty) || 0);
-  const isCustomPrice = variant && Number(line.price) !== variant.price;
+  const isCustomPrice = !isAddOnItem && variant && Number(line.price) !== variant.price;
 
   const onGroupChange = (groupId) => {
     const g = menu.find((mg) => mg.id === groupId);
     const it = g?.items?.[0];
-    const v = it?.variants?.[0];
-    onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", price: v?.price ?? "" });
+    if (it?.addOnMode) {
+      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, price: undefined });
+    } else {
+      const v = it?.variants?.[0];
+      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+    }
   };
   const onItemChange = (itemId) => {
     const it = group?.items.find((i) => i.id === itemId);
-    const v = it?.variants?.[0];
-    onChange({ ...line, itemId, variantId: v?.id || "", price: v?.price ?? "" });
+    if (it?.addOnMode) {
+      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, price: undefined });
+    } else {
+      const v = it?.variants?.[0];
+      onChange({ ...line, itemId, variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+    }
   };
   const onVariantChange = (variantId) => {
     const v = item?.variants.find((vv) => vv.id === variantId);
     onChange({ ...line, variantId, price: v?.price ?? "" });
+  };
+  const toggleAddOn = (addOnId) => {
+    const current = line.selectedAddOnIds || [];
+    const next = current.includes(addOnId) ? current.filter((id) => id !== addOnId) : [...current, addOnId];
+    onChange({ ...line, selectedAddOnIds: next });
   };
 
   return (
@@ -462,7 +488,52 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
         ))}
       </div>
 
-      {hasVariants && (
+      {isAddOnItem ? (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {STYLE_OPTIONS.map((s) => (
+              <button key={s} onClick={() => onChange({ ...line, style: s })} className="om-btn"
+                style={{ ...qtyPreset, ...((line.style || "Regular") === s ? qtyPresetActive : {}) }}>
+                {s} — {money(basePriceAt(item, s))}
+              </button>
+            ))}
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Sev</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {(item.sevOptions || []).map((s) => (
+              <button key={s.id} onClick={() => onChange({ ...line, sevOptionId: s.id })} className="om-btn"
+                style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                  padding: "8px 12px", borderRadius: 8, textAlign: "left",
+                  border: `1px solid ${line.sevOptionId === s.id ? C.moss : C.border}`, background: line.sevOptionId === s.id ? C.mossTint : C.card,
+                  color: line.sevOptionId === s.id ? C.mossDark : C.muted, fontSize: 13, cursor: "pointer",
+                }}>
+                <span>{s.name}</span>
+                <span>{s.extra > 0 ? `+${money(s.extra)}` : "included"}</span>
+              </button>
+            ))}
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Add-ons (pick any number)</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {(item.addOns || []).map((a) => {
+              const checked = (line.selectedAddOnIds || []).includes(a.id);
+              return (
+                <button key={a.id} onClick={() => toggleAddOn(a.id)} className="om-btn"
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "8px 12px", borderRadius: 8, textAlign: "left",
+                    border: `1px solid ${checked ? C.moss : C.border}`, background: checked ? C.mossTint : C.card,
+                    color: checked ? C.mossDark : C.muted, fontSize: 13, cursor: "pointer",
+                  }}>
+                  <span>{checked ? "✓ " : ""}{a.name}</span>
+                  <span>+{money(a.extra)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      ) : hasVariants && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
@@ -474,18 +545,22 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
         </>
       )}
 
-      <label style={{ ...fieldLabel, marginTop: 12 }}>Price per item{isCustomPrice ? " (custom)" : ""}</label>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-        <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 100 }}
-          value={line.price !== undefined ? line.price : (variant?.price ?? "")}
-          onChange={(e) => onChange({ ...line, price: e.target.value })} />
-        {isCustomPrice && (
-          <span style={{ fontSize: 12, color: C.ember }}>
-            menu price is {money(variant?.price)} — <button onClick={() => onChange({ ...line, price: variant?.price })} className="om-btn"
-              style={{ background: "none", border: "none", color: C.ember, textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}>reset</button>
-          </span>
-        )}
-      </div>
+      {!isAddOnItem && (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Price per item{isCustomPrice ? " (custom)" : ""}</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+            <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 100 }}
+              value={line.price !== undefined ? line.price : (variant?.price ?? "")}
+              onChange={(e) => onChange({ ...line, price: e.target.value })} />
+            {isCustomPrice && (
+              <span style={{ fontSize: 12, color: C.ember }}>
+                menu price is {money(variant?.price)} — <button onClick={() => onChange({ ...line, price: variant?.price })} className="om-btn"
+                  style={{ background: "none", border: "none", color: C.ember, textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}>reset</button>
+              </span>
+            )}
+          </div>
+        </>
+      )}
 
       <label style={{ ...fieldLabel, marginTop: 12 }}>Quantity</label>
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, flexWrap: "wrap" }}>
@@ -505,6 +580,48 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
 
 function firstVariant(item) { return item?.variants?.[0]; }
 function firstItem(group) { return group?.items?.[0]; }
+
+// --- Add-on item helpers (Surti Aloopuri: base price by style, one sev
+// choice, plus separate flat add-ons like Papdi/Cheese) ---
+const STYLE_OPTIONS = ["Regular", "Crunchy"];
+
+function basePriceAt(item, style) {
+  return style === "Crunchy" ? Number(item.basePriceCrunchy) : Number(item.basePriceRegular);
+}
+function defaultSevOptionId(item) {
+  const found = (item.sevOptions || []).find((s) => s.defaultChecked);
+  return found ? found.id : (item.sevOptions || [])[0]?.id;
+}
+function computeAddOnLinePrice(item, style, sevOptionId, selectedAddOnIds) {
+  const base = basePriceAt(item, style);
+  const sevOption = (item.sevOptions || []).find((s) => s.id === sevOptionId);
+  const sevExtra = sevOption ? Number(sevOption.extra) : 0;
+  const addOnsExtra = (item.addOns || []).filter((a) => selectedAddOnIds.includes(a.id)).reduce((s, a) => s + Number(a.extra), 0);
+  return base + sevExtra + addOnsExtra;
+}
+function formatAddOnVariantLabel(item, style, sevOptionId, selectedAddOnIds) {
+  const sevOption = (item.sevOptions || []).find((s) => s.id === sevOptionId);
+  const addOnNames = (item.addOns || []).filter((a) => selectedAddOnIds.includes(a.id)).map((a) => a.name);
+  const parts = [style];
+  if (sevOption) parts.push(sevOption.name);
+  parts.push(...addOnNames);
+  return parts.join(" + ");
+}
+// Reverses formatAddOnVariantLabel using substring matching rather than
+// delimiter-splitting -- the sev combo option's own name ("Red Sev +
+// Yellow Sev") contains a "+", so naive splitting would misparse it.
+// Checking the longest (most specific) option name first avoids that.
+function parseAddOnVariantLabel(item, variantLabel) {
+  const label = variantLabel || "";
+  const style = label.startsWith("Crunchy") ? "Crunchy" : "Regular";
+  const sevOptionsSorted = [...(item.sevOptions || [])].sort((a, b) => b.name.length - a.name.length);
+  let sevOptionId = defaultSevOptionId(item);
+  for (const opt of sevOptionsSorted) {
+    if (label.includes(opt.name)) { sevOptionId = opt.id; break; }
+  }
+  const selectedAddOnIds = (item.addOns || []).filter((a) => label.includes(a.name)).map((a) => a.id);
+  return { style, sevOptionId, selectedAddOnIds };
+}
 
 function creditBalanceFor(credits, customerName) {
   const key = customerName.trim().toLowerCase();
@@ -581,17 +698,26 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     return [...names];
   }, [orders]);
   const makeLine = () => {
-    const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
+    const g = menu[0]; const it = firstItem(g);
+    if (it?.addOnMode) {
+      return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 };
+    }
+    const v = firstVariant(it);
     return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" };
   };
   const [lines, setLines] = useState(menu.length ? [makeLine()] : []);
   useEffect(() => { if (menu.length && lines.length === 0) setLines([makeLine()]); }, [menu]);
 
-  const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
+  const getItemFor = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
+  const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
   const updateLine = (updated) => setLines(lines.map((l) => (l.id === updated.id ? updated : l)));
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const addLine = () => setLines([...lines, makeLine()]);
-  const linePrice = (l) => (l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0));
+  const linePrice = (l) => {
+    const it = getItemFor(l);
+    if (it?.addOnMode) return computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []);
+    return l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0);
+  };
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = forPartner ? 0 : Number(tip) || 0;
@@ -603,11 +729,26 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
 
   const submit = async () => {
     if (!effectiveCustomer.trim()) { setError(forPartner ? "Choose a partner." : "Customer name is required."); return; }
-    const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
-      const it = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
-      const v = getVariant(l);
-      return { name: it?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
-    });
+    const items = lines
+      .filter((l) => {
+        const it = getItemFor(l);
+        if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
+        if (it?.addOnMode) return (l.selectedAddOnIds || []).length > 0;
+        return Boolean(l.variantId);
+      })
+      .map((l) => {
+        const it = getItemFor(l);
+        if (it?.addOnMode) {
+          return {
+            name: it.name,
+            variantLabel: formatAddOnVariantLabel(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
+            price: computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
+            qty: Number(l.qty),
+          };
+        }
+        const v = getVariant(l);
+        return { name: it?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
+      });
     if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
     setError("");
     setSubmitting(true);
@@ -742,11 +883,19 @@ function orderToLines(order, menu) {
     for (const g of menu) {
       const item = g.items.find((i) => i.name === it.name);
       if (item) {
+        if (item.addOnMode) {
+          const { style, sevOptionId, selectedAddOnIds } = parseAddOnVariantLabel(item, it.variantLabel);
+          return { id: uid(), groupId: g.id, itemId: item.id, style, sevOptionId, selectedAddOnIds, qty: it.qty };
+        }
         const variant = item.variants.find((v) => v.label === it.variantLabel) || item.variants[0];
         return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty, price: it.price };
       }
     }
-    const g = menu[0]; const item = firstItem(g); const v = firstVariant(item);
+    const g = menu[0]; const item = firstItem(g);
+    if (item?.addOnMode) {
+      return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(item), selectedAddOnIds: [], qty: it.qty };
+    }
+    const v = firstVariant(item);
     return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", variantId: v?.id || "", qty: it.qty, price: it.price };
   });
 }
@@ -759,8 +908,13 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [orderDate, setOrderDate] = useState(tsToDateString(order.ts || Date.now()));
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const getVariant = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId)?.variants.find((v) => v.id === l.variantId);
-  const linePrice = (l) => (l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0));
+  const getItemFor = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
+  const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
+  const linePrice = (l) => {
+    const it = getItemFor(l);
+    if (it?.addOnMode) return computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []);
+    return l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0);
+  };
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = Number(tip) || 0;
@@ -768,16 +922,36 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const updateLine = (updated) => setLines(lines.map((l) => (l.id === updated.id ? updated : l)));
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const addLine = () => {
-    const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
+    const g = menu[0]; const it = firstItem(g);
+    if (it?.addOnMode) {
+      setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
+      return;
+    }
+    const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" }]);
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
-    const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0).map((l) => {
-      const item = menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
-      const v = getVariant(l);
-      return { name: item?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
-    });
+    const items = lines
+      .filter((l) => {
+        const it = getItemFor(l);
+        if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
+        if (it?.addOnMode) return (l.selectedAddOnIds || []).length > 0;
+        return Boolean(l.variantId);
+      })
+      .map((l) => {
+        const it = getItemFor(l);
+        if (it?.addOnMode) {
+          return {
+            name: it.name,
+            variantLabel: formatAddOnVariantLabel(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
+            price: computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
+            qty: Number(l.qty),
+          };
+        }
+        const v = getVariant(l);
+        return { name: it?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
+      });
     if (items.length === 0) { setError("Add at least one item with a valid quantity."); return; }
     setError("");
     setSubmitting(true);
@@ -1573,21 +1747,58 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
   );
 }
 
-function ItemForm({ initialName = "", initialVariants, submitLabel, onSubmit, onCancel }) {
+function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false, initialItem, submitLabel, onSubmit, onCancel }) {
   const [itemName, setItemName] = useState(initialName);
+  const [addOnMode, setAddOnMode] = useState(initialAddOnMode);
   const [variantRows, setVariantRows] = useState(
     initialVariants && initialVariants.length
       ? initialVariants.map((v) => ({ id: uid(), label: v.label || "", price: String(v.price) }))
       : [{ id: uid(), label: "", price: "" }]
+  );
+  const [baseRegular, setBaseRegular] = useState(initialItem?.basePriceRegular !== undefined ? String(initialItem.basePriceRegular) : "");
+  const [baseCrunchy, setBaseCrunchy] = useState(initialItem?.basePriceCrunchy !== undefined ? String(initialItem.basePriceCrunchy) : "");
+  const [sevRows, setSevRows] = useState(
+    initialItem?.sevOptions && initialItem.sevOptions.length
+      ? initialItem.sevOptions.map((s) => ({ id: uid(), name: s.name, extra: String(s.extra), defaultChecked: Boolean(s.defaultChecked) }))
+      : [{ id: uid(), name: "", extra: "0", defaultChecked: true }]
+  );
+  const [addOnRows, setAddOnRows] = useState(
+    initialItem?.addOns && initialItem.addOns.length
+      ? initialItem.addOns.map((a) => ({ id: uid(), name: a.name, extra: String(a.extra) }))
+      : [{ id: uid(), name: "", extra: "" }]
   );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const addVariantRow = () => setVariantRows([...variantRows, { id: uid(), label: "", price: "" }]);
   const updateVariantRow = (id, patch) => setVariantRows(variantRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const removeVariantRow = (id) => setVariantRows(variantRows.filter((r) => r.id !== id));
+  const addSevRow = () => setSevRows([...sevRows, { id: uid(), name: "", extra: "0", defaultChecked: false }]);
+  const updateSevRow = (id, patch) => setSevRows(sevRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const removeSevRow = (id) => setSevRows(sevRows.filter((r) => r.id !== id));
+  const addAddOnRow = () => setAddOnRows([...addOnRows, { id: uid(), name: "", extra: "" }]);
+  const updateAddOnRow = (id, patch) => setAddOnRows(addOnRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const removeAddOnRow = (id) => setAddOnRows(addOnRows.filter((r) => r.id !== id));
 
   const submit = async () => {
     if (!itemName.trim()) { setError("Item name is required."); return; }
+    if (addOnMode) {
+      if (!(Number(baseRegular) > 0)) { setError("A base Regular price is required."); return; }
+      const sevOptions = sevRows.filter((r) => r.name.trim()).map((r) => ({ id: uid(), name: r.name.trim(), extra: Number(r.extra) || 0, defaultChecked: r.defaultChecked }));
+      if (sevOptions.length === 0) { setError("Add at least one sev option."); return; }
+      if (!sevOptions.some((s) => s.defaultChecked)) sevOptions[0].defaultChecked = true;
+      const addOns = addOnRows.filter((r) => r.name.trim() && r.extra !== "").map((r) => ({ id: uid(), name: r.name.trim(), extra: Number(r.extra) || 0 }));
+      setError("");
+      setSubmitting(true);
+      const res = await onSubmit({
+        name: itemName.trim(), addOnMode: true,
+        basePriceRegular: Number(baseRegular),
+        basePriceCrunchy: baseCrunchy !== "" ? Number(baseCrunchy) : Number(baseRegular),
+        sevOptions, addOns,
+      });
+      setSubmitting(false);
+      if (res && !res.ok) { setError(res.error); return; }
+      return;
+    }
     const variants = variantRows.filter((r) => r.price !== "" && Number(r.price) > 0).map((r) => ({ id: uid(), label: r.label.trim(), price: Number(r.price) }));
     if (variants.length === 0) { setError("At least one price is required."); return; }
     setError("");
@@ -1595,22 +1806,67 @@ function ItemForm({ initialName = "", initialVariants, submitLabel, onSubmit, on
     const res = await onSubmit({ name: itemName.trim(), variants });
     setSubmitting(false);
     if (res && !res.ok) { setError(res.error); return; }
-    if (!onCancel) { setItemName(""); setVariantRows([{ id: uid(), label: "", price: "" }]); } // reset only for "add" mode
+    if (!onCancel) { setItemName(""); setVariantRows([{ id: uid(), label: "", price: "" }]); }
   };
 
   return (
     <div>
       <label style={fieldLabel}>Item name</label>
       <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => { setItemName(e.target.value); setError(""); }} />
-      <label style={{ ...fieldLabel, marginTop: 10 }}>Price options</label>
-      {variantRows.map((r) => (
-        <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
-          <input className="om-input" style={{ ...input, flex: 1 }} placeholder="Style name (optional, e.g. Regular)" value={r.label} onChange={(e) => updateVariantRow(r.id, { label: e.target.value })} />
-          <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => { updateVariantRow(r.id, { price: e.target.value }); setError(""); }} />
-          {variantRows.length > 1 && (<button onClick={() => removeVariantRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove price option"><X size={14} /></button>)}
-        </div>
-      ))}
-      <button onClick={addVariantRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another price option</button>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+        <button onClick={() => setAddOnMode(false)} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(!addOnMode ? qtyPresetActive : {}) }}>Simple item</button>
+        <button onClick={() => setAddOnMode(true)} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(addOnMode ? qtyPresetActive : {}) }}>Base + sev + add-ons</button>
+      </div>
+
+      {addOnMode ? (
+        <>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.4 }}>
+            Customers pick a style, then one sev option, then any number of flat add-ons on top of the base price.
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Base price</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, flex: 1 }} placeholder="Regular" value={baseRegular} onChange={(e) => { setBaseRegular(e.target.value); setError(""); }} />
+            <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, flex: 1 }} placeholder="Crunchy (optional, same as Regular if blank)" value={baseCrunchy} onChange={(e) => setBaseCrunchy(e.target.value)} />
+          </div>
+
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Sev options (customer picks one)</label>
+          {sevRows.map((r) => (
+            <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6, alignItems: "center" }}>
+              <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. Red Sev" value={r.name} onChange={(e) => { updateSevRow(r.id, { name: e.target.value }); setError(""); }} />
+              <input type="number" step="0.01" className="om-input" style={{ ...input, width: 90 }} placeholder="Extra" value={r.extra} onChange={(e) => updateSevRow(r.id, { extra: e.target.value })} />
+              <button onClick={() => setSevRows(sevRows.map((rr) => ({ ...rr, defaultChecked: rr.id === r.id })))} className="om-btn"
+                style={{ ...iconBtn, background: r.defaultChecked ? C.ember : C.card, color: r.defaultChecked ? "#FAF6EE" : C.muted, width: 34, height: 34 }}
+                aria-label="Set as default">{r.defaultChecked ? <Check size={14} /> : null}</button>
+              {sevRows.length > 1 && (<button onClick={() => removeSevRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove sev option"><X size={14} /></button>)}
+            </div>
+          ))}
+          <button onClick={addSevRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another sev option</button>
+
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Add-ons (flat extra, customer picks any number)</label>
+          {addOnRows.map((r) => (
+            <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. Cheese" value={r.name} onChange={(e) => { updateAddOnRow(r.id, { name: e.target.value }); setError(""); }} />
+              <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 90 }} placeholder="+$" value={r.extra} onChange={(e) => updateAddOnRow(r.id, { extra: e.target.value })} />
+              {addOnRows.length > 1 && (<button onClick={() => removeAddOnRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove add-on"><X size={14} /></button>)}
+            </div>
+          ))}
+          <button onClick={addAddOnRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another add-on</button>
+        </>
+      ) : (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Price options</label>
+          {variantRows.map((r) => (
+            <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <input className="om-input" style={{ ...input, flex: 1 }} placeholder="Style name (optional, e.g. Regular)" value={r.label} onChange={(e) => updateVariantRow(r.id, { label: e.target.value })} />
+              <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="$0.00" value={r.price} onChange={(e) => { updateVariantRow(r.id, { price: e.target.value }); setError(""); }} />
+              {variantRows.length > 1 && (<button onClick={() => removeVariantRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove price option"><X size={14} /></button>)}
+            </div>
+          ))}
+          <button onClick={addVariantRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another price option</button>
+        </>
+      )}
+
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         {onCancel && (
@@ -1677,9 +1933,9 @@ function GroupCard({ group, onAddItem, onUpdateItem, onRemoveItem, onRemoveGroup
           editingItemId === it.id ? (
             <div key={it.id} style={{ ...lineBox, background: C.card }}>
               <ItemForm
-                initialName={it.name} initialVariants={it.variants} submitLabel="Save item"
-                onSubmit={async ({ name, variants }) => {
-                  const res = await onUpdateItem({ id: it.id, name, variants });
+                initialName={it.name} initialVariants={it.variants} initialAddOnMode={Boolean(it.addOnMode)} initialItem={it} submitLabel="Save item"
+                onSubmit={async (updated) => {
+                  const res = await onUpdateItem({ id: it.id, ...updated });
                   if (res.ok) setEditingItemId(null);
                   return res;
                 }}
@@ -1690,7 +1946,11 @@ function GroupCard({ group, onAddItem, onUpdateItem, onRemoveItem, onRemoveGroup
             <div key={it.id} style={rowCard}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 14, fontWeight: 500 }}>{it.name}</div>
-                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{it.variants.map((v) => `${v.label ? v.label + " " : ""}${money(v.price)}`).join(" · ")}</div>
+                <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
+                  {it.addOnMode
+                    ? `Base ${money(it.basePriceRegular)}/${money(it.basePriceCrunchy)} · Sev: ${(it.sevOptions || []).map((s) => s.name).join(", ")} · Add-ons: ${(it.addOns || []).map((a) => a.name).join(", ") || "none"}`
+                    : (it.variants || []).map((v) => `${v.label ? v.label + " " : ""}${money(v.price)}`).join(" · ")}
+                </div>
               </div>
               <button onClick={() => setEditingItemId(it.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit item"><Pencil size={14} /></button>
               <ConfirmDelete label={it.name} onConfirm={() => onRemoveItem(it.id)} />

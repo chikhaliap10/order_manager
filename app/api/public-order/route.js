@@ -57,11 +57,27 @@ export async function POST(req) {
     for (const reqItem of body.items) {
       const group = menu.find((g) => g.id === reqItem.groupId);
       const item = group?.items.find((i) => i.id === reqItem.itemId);
-      const variant = item?.variants.find((v) => v.id === reqItem.variantId);
       const qty = Number(reqItem.qty);
-      if (!group || !item || !variant || !(qty > 0)) continue;
-      totalPlates += qty;
-      resolvedItems.push({ name: item.name, variantLabel: variant.label || "", price: variant.price, qty });
+      if (!group || !item || !(qty > 0)) continue;
+
+      if (item.addOnMode) {
+        const style = reqItem.style === "Crunchy" ? "Crunchy" : "Regular";
+        const sevOption = (item.sevOptions || []).find((s) => s.id === reqItem.sevOptionId);
+        if (!sevOption) continue;
+        const addOnIds = Array.isArray(reqItem.addOnIds) ? reqItem.addOnIds : [];
+        const selectedAddOns = (item.addOns || []).filter((a) => addOnIds.includes(a.id));
+        const base = style === "Crunchy" ? Number(item.basePriceCrunchy) : Number(item.basePriceRegular);
+        const price = base + Number(sevOption.extra) + selectedAddOns.reduce((s, a) => s + Number(a.extra), 0);
+        const parts = [style, sevOption.name, ...selectedAddOns.map((a) => a.name)];
+        const variantLabel = parts.join(" + ");
+        totalPlates += qty;
+        resolvedItems.push({ name: item.name, variantLabel, price, qty });
+      } else {
+        const variant = item.variants.find((v) => v.id === reqItem.variantId);
+        if (!variant) continue;
+        totalPlates += qty;
+        resolvedItems.push({ name: item.name, variantLabel: variant.label || "", price: variant.price, qty });
+      }
     }
 
     if (resolvedItems.length === 0) {
