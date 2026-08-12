@@ -133,13 +133,23 @@ export default function HomePage() {
 
   useEffect(() => { refresh(); }, []);
 
-  // Keep the app's data reasonably fresh automatically -- this is what
-  // makes new customer-placed orders show up in Incoming without staff
-  // needing to manually reload the page.
+  // Keep the app's data fresh automatically -- this is what makes new
+  // customer-placed orders show up in Incoming without staff needing to
+  // manually reload. Browsers throttle setInterval in background/inactive
+  // tabs, so a plain interval alone isn't reliable -- pairing it with a
+  // refresh on tab-focus/visibility-return catches the case where staff
+  // switches back to this tab after it's been sitting in the background.
   useEffect(() => {
     if (!unlocked) return;
-    const interval = setInterval(() => { refresh(); }, 20000);
-    return () => clearInterval(interval);
+    const interval = setInterval(() => { refresh(); }, 8000);
+    const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
   }, [unlocked]);
 
   const handleUnlock = async () => {
@@ -358,12 +368,14 @@ export default function HomePage() {
 
 function IncomingOrdersTab({ orders, onMoveToHistory, onDelete }) {
   const [movingId, setMovingId] = useState(null);
+  const [confirmingDuplicateId, setConfirmingDuplicateId] = useState(null);
   const incoming = orders.filter((o) => o.source === "online" && !o.reviewed).sort((a, b) => a.ts - b.ts); // oldest first, first-come-first-served
 
   const move = async (id) => {
     setMovingId(id);
     await onMoveToHistory(id);
     setMovingId(null);
+    setConfirmingDuplicateId(null);
   };
 
   if (incoming.length === 0) {
@@ -379,8 +391,14 @@ function IncomingOrdersTab({ orders, onMoveToHistory, onDelete }) {
       <div style={{ ...sectionTitle, marginBottom: 14 }}>{incoming.length} new order{incoming.length === 1 ? "" : "s"} waiting</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
         {incoming.map((o) => (
-          <div key={o.id} style={{ ...card, borderLeft: `4px solid ${C.ember}`, padding: 20 }}>
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>{o.customer}</div>
+          <div key={o.id} style={{ ...card, borderLeft: `4px solid ${o.possibleDuplicate ? C.danger : C.ember}`, padding: 20 }}>
+            {o.possibleDuplicate && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, background: C.dangerTint, color: C.danger, borderRadius: 8, padding: "6px 10px", fontSize: 12, fontWeight: 600, marginBottom: 10 }}>
+                ⚠️ Possible duplicate — same name or phone ordered recently
+              </div>
+            )}
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, marginBottom: 2 }}>{o.customer}</div>
+            {o.phone && <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>{o.phone}</div>}
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
               {new Date(o.ts).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
             </div>
@@ -392,12 +410,31 @@ function IncomingOrdersTab({ orders, onMoveToHistory, onDelete }) {
               ))}
             </div>
             <div style={{ ...displayNum, fontSize: 18, color: C.moss, marginBottom: 14 }}>{money(o.total)}</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => move(o.id)} disabled={movingId === o.id} style={{ ...primaryBtn, marginTop: 0, opacity: movingId === o.id ? 0.7 : 1 }} className="om-btn">
-                {movingId === o.id ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} Move to Order History
-              </button>
-              <ConfirmDelete label="incoming order" onConfirm={() => onDelete(o.id)} />
-            </div>
+            {o.possibleDuplicate && confirmingDuplicateId !== o.id ? (
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setConfirmingDuplicateId(o.id)} style={{ ...primaryBtn, marginTop: 0, background: C.danger }} className="om-btn">
+                  Review before preparing
+                </button>
+                <ConfirmDelete label="incoming order" onConfirm={() => onDelete(o.id)} />
+              </div>
+            ) : o.possibleDuplicate ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 12, color: C.muted }}>Confirm this is a genuine separate order, not a duplicate or mistake.</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => setConfirmingDuplicateId(null)} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Back</button>
+                  <button onClick={() => move(o.id)} disabled={movingId === o.id} style={{ ...primaryBtn, marginTop: 0, opacity: movingId === o.id ? 0.7 : 1 }} className="om-btn">
+                    {movingId === o.id ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} Confirmed, move to Order History
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => move(o.id)} disabled={movingId === o.id} style={{ ...primaryBtn, marginTop: 0, opacity: movingId === o.id ? 0.7 : 1 }} className="om-btn">
+                  {movingId === o.id ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} Move to Order History
+                </button>
+                <ConfirmDelete label="incoming order" onConfirm={() => onDelete(o.id)} />
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -429,32 +466,39 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
   const isAddOnItem = Boolean(item?.addOnMode);
+  const isSizeFlavorItem = Boolean(item?.sizeFlavorMode);
 
-  const hasVariants = !isAddOnItem && item && item.variants.length > 1;
-  const variant = !isAddOnItem ? item?.variants.find((v) => v.id === line.variantId) : null;
+  const hasVariants = !isAddOnItem && !isSizeFlavorItem && item && item.variants.length > 1;
+  const variant = (!isAddOnItem && !isSizeFlavorItem) ? item?.variants.find((v) => v.id === line.variantId) : null;
   const price = isAddOnItem
     ? computeAddOnLinePrice(item, line.style || "Regular", line.sevOptionId, line.selectedAddOnIds || [])
+    : isSizeFlavorItem
+    ? computeSizeFlavorPrice(item, line.sizeId, line.flavorId)
     : (line.price !== undefined && line.price !== "" ? Number(line.price) : (variant?.price || 0));
   const total = price * (Number(line.qty) || 0);
-  const isCustomPrice = !isAddOnItem && variant && Number(line.price) !== variant.price;
+  const isCustomPrice = !isAddOnItem && !isSizeFlavorItem && variant && Number(line.price) !== variant.price;
 
   const onGroupChange = (groupId) => {
     const g = menu.find((mg) => mg.id === groupId);
     const it = g?.items?.[0];
     if (it?.addOnMode) {
-      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, price: undefined });
+      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined, price: undefined });
+    } else if (it?.sizeFlavorMode) {
+      onChange({ ...line, groupId, itemId: it.id, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, price: undefined });
     } else {
       const v = it?.variants?.[0];
-      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
     }
   };
   const onItemChange = (itemId) => {
     const it = group?.items.find((i) => i.id === itemId);
     if (it?.addOnMode) {
-      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, price: undefined });
+      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined, price: undefined });
+    } else if (it?.sizeFlavorMode) {
+      onChange({ ...line, itemId, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, price: undefined });
     } else {
       const v = it?.variants?.[0];
-      onChange({ ...line, itemId, variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+      onChange({ ...line, itemId, variantId: v?.id || "", price: v?.price ?? "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
     }
   };
   const onVariantChange = (variantId) => {
@@ -533,6 +577,36 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
             })}
           </div>
         </>
+      ) : isSizeFlavorItem ? (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Size</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {(item.sizes || []).map((s) => (
+              <button key={s.id} onClick={() => onChange({ ...line, sizeId: s.id })} className="om-btn"
+                style={{ ...qtyPreset, ...(line.sizeId === s.id ? qtyPresetActive : {}) }}>
+                {s.name} — {money(s.basePrice)}
+              </button>
+            ))}
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Flavor</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {(item.flavors || []).map((f) => {
+              const extra = Number(f.extraBySize?.[line.sizeId] || 0);
+              return (
+                <button key={f.id} onClick={() => onChange({ ...line, flavorId: f.id })} className="om-btn"
+                  style={{
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                    padding: "8px 12px", borderRadius: 8, textAlign: "left",
+                    border: `1px solid ${line.flavorId === f.id ? C.moss : C.border}`, background: line.flavorId === f.id ? C.mossTint : C.card,
+                    color: line.flavorId === f.id ? C.mossDark : C.muted, fontSize: 13, cursor: "pointer",
+                  }}>
+                  <span>{f.name}</span>
+                  <span>{extra > 0 ? `+${money(extra)}` : "included"}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
       ) : hasVariants && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
@@ -545,7 +619,7 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
         </>
       )}
 
-      {!isAddOnItem && (
+      {!isAddOnItem && !isSizeFlavorItem && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Price per item{isCustomPrice ? " (custom)" : ""}</label>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
@@ -623,6 +697,51 @@ function parseAddOnVariantLabel(item, variantLabel) {
   return { style, sevOptionId, selectedAddOnIds };
 }
 
+// --- Size + flavor item helpers (Coco: base price by size, one flavor
+// choice whose extra charge depends on which size was picked) ---
+function defaultSizeId(item) { return (item.sizes || [])[0]?.id; }
+function defaultFlavorId(item) {
+  const found = (item.flavors || []).find((f) => f.defaultChecked);
+  return found ? found.id : (item.flavors || [])[0]?.id;
+}
+function computeSizeFlavorPrice(item, sizeId, flavorId) {
+  const size = (item.sizes || []).find((s) => s.id === sizeId);
+  if (!size) return 0;
+  const flavor = (item.flavors || []).find((f) => f.id === flavorId);
+  const extra = flavor ? Number(flavor.extraBySize?.[sizeId] || 0) : 0;
+  return Number(size.basePrice) + extra;
+}
+function formatSizeFlavorLabel(item, sizeId, flavorId) {
+  const size = (item.sizes || []).find((s) => s.id === sizeId);
+  const flavor = (item.flavors || []).find((f) => f.id === flavorId);
+  return [size?.name, flavor?.name].filter(Boolean).join(" + ");
+}
+// Like parseAddOnVariantLabel, uses substring matching (longest name
+// first) since every Coco flavor name contains the word "Coco" -- e.g.
+// "Kaju Coco" would wrongly match plain "Coco" first if checked out of
+// order.
+function parseSizeFlavorLabel(item, variantLabel) {
+  const label = variantLabel || "";
+  let sizeId = defaultSizeId(item);
+  for (const s of item.sizes || []) {
+    if (label.includes(s.name)) { sizeId = s.id; break; }
+  }
+  let flavorId = defaultFlavorId(item);
+  const flavorsSorted = [...(item.flavors || [])].sort((a, b) => b.name.length - a.name.length);
+  for (const f of flavorsSorted) {
+    if (label.includes(f.name)) { flavorId = f.id; break; }
+  }
+  return { sizeId, flavorId };
+}
+
+// Lenient but real check: strips everything but digits, then requires a
+// plausible length (10 covers a US number, up to 15 covers most
+// international numbers with a country code).
+function isValidPhone(phone) {
+  const digits = (phone || "").replace(/[^\d]/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+}
+
 function creditBalanceFor(credits, customerName) {
   const key = customerName.trim().toLowerCase();
   if (!key) return 0;
@@ -684,6 +803,7 @@ function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeho
 
 function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
+  const [phone, setPhone] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
   const [forPartner, setForPartner] = useState(false);
@@ -702,6 +822,9 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     if (it?.addOnMode) {
       return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 };
     }
+    if (it?.sizeFlavorMode) {
+      return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 };
+    }
     const v = firstVariant(it);
     return { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" };
   };
@@ -716,6 +839,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
   const linePrice = (l) => {
     const it = getItemFor(l);
     if (it?.addOnMode) return computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []);
+    if (it?.sizeFlavorMode) return computeSizeFlavorPrice(it, l.sizeId, l.flavorId);
     return l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0);
   };
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
@@ -729,11 +853,13 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
 
   const submit = async () => {
     if (!effectiveCustomer.trim()) { setError(forPartner ? "Choose a partner." : "Customer name is required."); return; }
+    if (!forPartner && !isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
         if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
-        if (it?.addOnMode) return (l.selectedAddOnIds || []).length > 0;
+        if (it?.addOnMode) return Boolean(l.sevOptionId);
+        if (it?.sizeFlavorMode) return Boolean(l.sizeId);
         return Boolean(l.variantId);
       })
       .map((l) => {
@@ -743,6 +869,14 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
             name: it.name,
             variantLabel: formatAddOnVariantLabel(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
             price: computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []),
+            qty: Number(l.qty),
+          };
+        }
+        if (it?.sizeFlavorMode) {
+          return {
+            name: it.name,
+            variantLabel: formatSizeFlavorLabel(it, l.sizeId, l.flavorId),
+            price: computeSizeFlavorPrice(it, l.sizeId, l.flavorId),
             qty: Number(l.qty),
           };
         }
@@ -763,7 +897,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
             collectedBy: settlement === "deduct" ? partnerId : "", ts,
           }
         : {
-            id: uid(), customer: customer.trim(), items, tip: tipAmount,
+            id: uid(), customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount,
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -772,7 +906,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     if (!forPartner && creditToApply > 0) {
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
+    setCustomer(""); setPhone(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
   };
 
   return (
@@ -832,6 +966,11 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
                     </button>
                   </div>
                 )}
+                <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+                <input type="tel" className="om-input" style={input} placeholder="e.g. (551) 359-1166" value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
+                {phone.trim() && !isValidPhone(phone) && (
+                  <div style={{ fontSize: 12, color: C.danger, marginTop: 4 }}>Enter at least 10 digits.</div>
+                )}
               </>
             )}
 
@@ -887,6 +1026,10 @@ function orderToLines(order, menu) {
           const { style, sevOptionId, selectedAddOnIds } = parseAddOnVariantLabel(item, it.variantLabel);
           return { id: uid(), groupId: g.id, itemId: item.id, style, sevOptionId, selectedAddOnIds, qty: it.qty };
         }
+        if (item.sizeFlavorMode) {
+          const { sizeId, flavorId } = parseSizeFlavorLabel(item, it.variantLabel);
+          return { id: uid(), groupId: g.id, itemId: item.id, sizeId, flavorId, qty: it.qty };
+        }
         const variant = item.variants.find((v) => v.label === it.variantLabel) || item.variants[0];
         return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty, price: it.price };
       }
@@ -895,6 +1038,9 @@ function orderToLines(order, menu) {
     if (item?.addOnMode) {
       return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(item), selectedAddOnIds: [], qty: it.qty };
     }
+    if (item?.sizeFlavorMode) {
+      return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", sizeId: defaultSizeId(item), flavorId: defaultFlavorId(item), qty: it.qty };
+    }
     const v = firstVariant(item);
     return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", variantId: v?.id || "", qty: it.qty, price: it.price };
   });
@@ -902,6 +1048,7 @@ function orderToLines(order, menu) {
 
 function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
+  const [phone, setPhone] = useState(order.phone || "");
   const [lines, setLines] = useState(orderToLines(order, menu));
   const [tip, setTip] = useState(order.tip ? String(order.tip) : "");
   const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
@@ -913,6 +1060,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const linePrice = (l) => {
     const it = getItemFor(l);
     if (it?.addOnMode) return computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []);
+    if (it?.sizeFlavorMode) return computeSizeFlavorPrice(it, l.sizeId, l.flavorId);
     return l.price !== undefined && l.price !== "" ? Number(l.price) : (getVariant(l)?.price || 0);
   };
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
@@ -927,16 +1075,22 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
       return;
     }
+    if (it?.sizeFlavorMode) {
+      setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 }]);
+      return;
+    }
     const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" }]);
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
+    if (!isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
         if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
-        if (it?.addOnMode) return (l.selectedAddOnIds || []).length > 0;
+        if (it?.addOnMode) return Boolean(l.sevOptionId);
+        if (it?.sizeFlavorMode) return Boolean(l.sizeId);
         return Boolean(l.variantId);
       })
       .map((l) => {
@@ -949,6 +1103,14 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
             qty: Number(l.qty),
           };
         }
+        if (it?.sizeFlavorMode) {
+          return {
+            name: it.name,
+            variantLabel: formatSizeFlavorLabel(it, l.sizeId, l.flavorId),
+            price: computeSizeFlavorPrice(it, l.sizeId, l.flavorId),
+            qty: Number(l.qty),
+          };
+        }
         const v = getVariant(l);
         return { name: it?.name || "Item", variantLabel: v?.label || "", price: linePrice(l), qty: Number(l.qty) };
       });
@@ -956,7 +1118,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onSave({ ...order, customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
+    const res = await onSave({ ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -966,6 +1128,8 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <div style={cardTitle}>Editing order</div>
       <label style={fieldLabel}>Customer name</label>
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+      <input type="tel" className="om-input" style={input} value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
       {order.paid && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Collected by</label>
@@ -1403,6 +1567,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
                       <span style={{ fontSize: 10, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px" }}>Placed online</span>
                     )}
                   </div>
+                  {o.phone && <div style={{ fontSize: 12, color: C.muted, marginTop: 1 }}>{o.phone}</div>}
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
@@ -1748,8 +1913,9 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
 }
 
 function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false, initialItem, submitLabel, onSubmit, onCancel }) {
+  const initialMode = initialAddOnMode ? "addons" : initialItem?.sizeFlavorMode ? "sizeFlavor" : "simple";
   const [itemName, setItemName] = useState(initialName);
-  const [addOnMode, setAddOnMode] = useState(initialAddOnMode);
+  const [mode, setMode] = useState(initialMode);
   const [variantRows, setVariantRows] = useState(
     initialVariants && initialVariants.length
       ? initialVariants.map((v) => ({ id: uid(), label: v.label || "", price: String(v.price) }))
@@ -1767,6 +1933,24 @@ function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false,
       ? initialItem.addOns.map((a) => ({ id: uid(), name: a.name, extra: String(a.extra) }))
       : [{ id: uid(), name: "", extra: "" }]
   );
+  // Size+flavor state: size rows use a stable local id so flavor rows can
+  // key their per-size extra price to the right column while editing.
+  const [sizeRows, setSizeRows] = useState(
+    initialItem?.sizes && initialItem.sizes.length
+      ? initialItem.sizes.map((s) => ({ id: uid(), origId: s.id, name: s.name, basePrice: String(s.basePrice) }))
+      : [{ id: uid(), origId: null, name: "", basePrice: "" }, { id: uid(), origId: null, name: "", basePrice: "" }]
+  );
+  const [flavorRows, setFlavorRows] = useState(
+    initialItem?.flavors && initialItem.flavors.length
+      ? initialItem.flavors.map((f) => {
+          const bySizeRowId = {};
+          (initialItem.sizes || []).forEach((s, i) => {
+            bySizeRowId[sizeRows?.[i]?.id] = String(f.extraBySize?.[s.id] ?? 0);
+          });
+          return { id: uid(), name: f.name, defaultChecked: Boolean(f.defaultChecked), extraBySizeRow: bySizeRowId };
+        })
+      : [{ id: uid(), name: "", defaultChecked: true, extraBySizeRow: {} }]
+  );
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const addVariantRow = () => setVariantRows([...variantRows, { id: uid(), label: "", price: "" }]);
@@ -1778,10 +1962,16 @@ function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false,
   const addAddOnRow = () => setAddOnRows([...addOnRows, { id: uid(), name: "", extra: "" }]);
   const updateAddOnRow = (id, patch) => setAddOnRows(addOnRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const removeAddOnRow = (id) => setAddOnRows(addOnRows.filter((r) => r.id !== id));
+  const addSizeRow = () => setSizeRows([...sizeRows, { id: uid(), origId: null, name: "", basePrice: "" }]);
+  const updateSizeRow = (id, patch) => setSizeRows(sizeRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const removeSizeRow = (id) => setSizeRows(sizeRows.filter((r) => r.id !== id));
+  const addFlavorRow = () => setFlavorRows([...flavorRows, { id: uid(), name: "", defaultChecked: false, extraBySizeRow: {} }]);
+  const updateFlavorRow = (id, patch) => setFlavorRows(flavorRows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const removeFlavorRow = (id) => setFlavorRows(flavorRows.filter((r) => r.id !== id));
 
   const submit = async () => {
     if (!itemName.trim()) { setError("Item name is required."); return; }
-    if (addOnMode) {
+    if (mode === "addons") {
       if (!(Number(baseRegular) > 0)) { setError("A base Regular price is required."); return; }
       const sevOptions = sevRows.filter((r) => r.name.trim()).map((r) => ({ id: uid(), name: r.name.trim(), extra: Number(r.extra) || 0, defaultChecked: r.defaultChecked }));
       if (sevOptions.length === 0) { setError("Add at least one sev option."); return; }
@@ -1795,6 +1985,25 @@ function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false,
         basePriceCrunchy: baseCrunchy !== "" ? Number(baseCrunchy) : Number(baseRegular),
         sevOptions, addOns,
       });
+      setSubmitting(false);
+      if (res && !res.ok) { setError(res.error); return; }
+      return;
+    }
+    if (mode === "sizeFlavor") {
+      const validSizeRows = sizeRows.filter((r) => r.name.trim() && Number(r.basePrice) > 0);
+      if (validSizeRows.length === 0) { setError("Add at least one size with a valid price."); return; }
+      const validFlavorRows = flavorRows.filter((r) => r.name.trim());
+      if (validFlavorRows.length === 0) { setError("Add at least one flavor."); return; }
+      const sizes = validSizeRows.map((r) => ({ id: uid(), name: r.name.trim(), basePrice: Number(r.basePrice), _rowId: r.id }));
+      const flavors = validFlavorRows.map((r) => ({
+        id: uid(), name: r.name.trim(), defaultChecked: r.defaultChecked,
+        extraBySize: Object.fromEntries(sizes.map((s) => [s.id, Number(r.extraBySizeRow[s._rowId] || 0)])),
+      }));
+      if (!flavors.some((f) => f.defaultChecked)) flavors[0].defaultChecked = true;
+      const cleanSizes = sizes.map(({ _rowId, ...s }) => s);
+      setError("");
+      setSubmitting(true);
+      const res = await onSubmit({ name: itemName.trim(), sizeFlavorMode: true, sizes: cleanSizes, flavors });
       setSubmitting(false);
       if (res && !res.ok) { setError(res.error); return; }
       return;
@@ -1814,12 +2023,13 @@ function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false,
       <label style={fieldLabel}>Item name</label>
       <input className="om-input" style={input} placeholder="e.g. Red Sev" value={itemName} onChange={(e) => { setItemName(e.target.value); setError(""); }} />
 
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={() => setAddOnMode(false)} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(!addOnMode ? qtyPresetActive : {}) }}>Simple item</button>
-        <button onClick={() => setAddOnMode(true)} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(addOnMode ? qtyPresetActive : {}) }}>Base + sev + add-ons</button>
+      <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+        <button onClick={() => setMode("simple")} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(mode === "simple" ? qtyPresetActive : {}) }}>Simple item</button>
+        <button onClick={() => setMode("addons")} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(mode === "addons" ? qtyPresetActive : {}) }}>Base + sev + add-ons</button>
+        <button onClick={() => setMode("sizeFlavor")} className="om-btn" style={{ ...qtyPreset, flex: 1, ...(mode === "sizeFlavor" ? qtyPresetActive : {}) }}>Size + flavor</button>
       </div>
 
-      {addOnMode ? (
+      {mode === "addons" ? (
         <>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.4 }}>
             Customers pick a style, then one sev option, then any number of flat add-ons on top of the base price.
@@ -1852,6 +2062,44 @@ function ItemForm({ initialName = "", initialVariants, initialAddOnMode = false,
             </div>
           ))}
           <button onClick={addAddOnRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another add-on</button>
+        </>
+      ) : mode === "sizeFlavor" ? (
+        <>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 8, lineHeight: 1.4 }}>
+            Customers pick a size (its own base price), then one flavor -- each flavor's extra charge can be different per size.
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 10 }}>Sizes</label>
+          {sizeRows.map((r) => (
+            <div key={r.id} style={{ display: "flex", gap: 8, marginTop: 6 }}>
+              <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. 12 oz" value={r.name} onChange={(e) => { updateSizeRow(r.id, { name: e.target.value }); setError(""); }} />
+              <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, width: 100 }} placeholder="Base $" value={r.basePrice} onChange={(e) => { updateSizeRow(r.id, { basePrice: e.target.value }); setError(""); }} />
+              {sizeRows.length > 1 && (<button onClick={() => removeSizeRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove size"><X size={14} /></button>)}
+            </div>
+          ))}
+          <button onClick={addSizeRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another size</button>
+
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Flavors (extra $ per size)</label>
+          {flavorRows.map((r) => (
+            <div key={r.id} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 8, marginTop: 6 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="om-input" style={{ ...input, flex: 1 }} placeholder="e.g. Kaju Coco" value={r.name} onChange={(e) => { updateFlavorRow(r.id, { name: e.target.value }); setError(""); }} />
+                <button onClick={() => setFlavorRows(flavorRows.map((rr) => ({ ...rr, defaultChecked: rr.id === r.id })))} className="om-btn"
+                  style={{ ...iconBtn, background: r.defaultChecked ? C.ember : C.card, color: r.defaultChecked ? "#FAF6EE" : C.muted, width: 34, height: 34 }}
+                  aria-label="Set as default">{r.defaultChecked ? <Check size={14} /> : null}</button>
+                {flavorRows.length > 1 && (<button onClick={() => removeFlavorRow(r.id)} style={iconBtn} className="om-btn" aria-label="Remove flavor"><X size={14} /></button>)}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                {sizeRows.filter((sr) => sr.name.trim()).map((sr) => (
+                  <div key={sr.id} style={{ flex: "1 1 100px" }}>
+                    <label style={{ ...fieldLabel, marginBottom: 4 }}>{sr.name} extra</label>
+                    <input type="number" step="0.01" className="om-input" style={{ ...input, marginTop: 0 }} placeholder="0"
+                      value={r.extraBySizeRow[sr.id] || ""} onChange={(e) => updateFlavorRow(r.id, { extraBySizeRow: { ...r.extraBySizeRow, [sr.id]: e.target.value } })} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <button onClick={addFlavorRow} style={ghostBtn} className="om-btn"><Plus size={13} /> Add another flavor</button>
         </>
       ) : (
         <>
@@ -1949,6 +2197,8 @@ function GroupCard({ group, onAddItem, onUpdateItem, onRemoveItem, onRemoveGroup
                 <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>
                   {it.addOnMode
                     ? `Base ${money(it.basePriceRegular)}/${money(it.basePriceCrunchy)} · Sev: ${(it.sevOptions || []).map((s) => s.name).join(", ")} · Add-ons: ${(it.addOns || []).map((a) => a.name).join(", ") || "none"}`
+                    : it.sizeFlavorMode
+                    ? `Sizes: ${(it.sizes || []).map((s) => `${s.name} ${money(s.basePrice)}`).join(", ")} · Flavors: ${(it.flavors || []).map((f) => f.name).join(", ")}`
                     : (it.variants || []).map((v) => `${v.label ? v.label + " " : ""}${money(v.price)}`).join(" · ")}
                 </div>
               </div>

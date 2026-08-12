@@ -34,7 +34,7 @@ export async function GET(req) {
 
     const now = new Date().toISOString();
     const orderRows = orders.map((o) => [
-      now, o.id, o.customer, itemsSummary(o.items), o.total, o.paid ? "paid" : "unpaid",
+      now, o.id, o.customer, o.phone || "", itemsSummary(o.items), o.total, o.paid ? "paid" : "unpaid",
       o.collectedBy ? partnerName(o.collectedBy) : "Shared account",
     ]);
     const expenseRows = expenses.map((e) => [
@@ -44,7 +44,7 @@ export async function GET(req) {
     const withdrawalRows = withdrawals.map((w) => [now, w.id, partnerName(w.partnerId), w.amount, w.note || ""]);
 
     const [ordersResult, expensesResult, withdrawalsResult] = await Promise.all([
-      overwriteTab("Orders", ["Timestamp", "Order ID", "Customer", "Items", "Total", "Status", "Collected By"], orderRows),
+      overwriteTab("Orders", ["Timestamp", "Order ID", "Customer", "Phone", "Items", "Total", "Status", "Collected By"], orderRows),
       overwriteTab("Expenses", ["Timestamp", "Expense ID", "Category", "Amount", "Note", "Paid By"], expenseRows),
       overwriteTab("Withdrawals", ["Timestamp", "Withdrawal ID", "Partner", "Amount", "Note"], withdrawalRows),
     ]);

@@ -27,6 +27,10 @@ export async function POST(req) {
         if (payload.tip !== undefined && Number(payload.tip) < 0) return badRequest("Tip cannot be negative.");
         if (payload.creditApplied !== undefined && Number(payload.creditApplied) < 0) return badRequest("Applied credit cannot be negative.");
         if (payload.items.some((i) => !(Number(i.price) > 0))) return badRequest("Each item's price must be greater than 0.");
+        if (payload.phone) {
+          const digits = String(payload.phone).replace(/[^\d]/g, "");
+          if (digits.length < 10 || digits.length > 15) return badRequest("Enter a valid phone number.");
+        }
       }
 
       let orders = await getKey("orders", []);
@@ -104,6 +108,13 @@ export async function POST(req) {
           if (!(Number(item.basePriceRegular) > 0)) return badRequest("A base Regular price is required.");
           if (!Array.isArray(item.sevOptions) || item.sevOptions.length === 0) {
             return badRequest("At least one sev option is required.");
+          }
+        } else if (item.sizeFlavorMode) {
+          if (!Array.isArray(item.sizes) || item.sizes.length === 0 || !item.sizes.some((s) => Number(s.basePrice) > 0)) {
+            return badRequest("At least one size with a valid price is required.");
+          }
+          if (!Array.isArray(item.flavors) || item.flavors.length === 0) {
+            return badRequest("At least one flavor is required.");
           }
         } else if (!Array.isArray(item.variants) || item.variants.length === 0 || !item.variants.some((v) => Number(v.price) > 0)) {
           return badRequest("At least one price is required.");

@@ -1,15 +1,21 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { Plus, X, Loader2, Check, ChevronDown } from "lucide-react";
+import { Plus, X, Loader2, Check } from "lucide-react";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 const C = {
   ink: "#F0EDE6", paper: "#121412", card: "#1C1F1B",
-  moss: "#43966B", mossTint: "rgba(67,150,107,0.18)",
-  ember: "#F0A868", border: "#2C302A", muted: "#9BA39A",
+  moss: "#43966B", mossDark: "#8FE0B3", mossTint: "rgba(67,150,107,0.18)",
+  ember: "#F0A868", emberTint: "rgba(240,168,104,0.16)",
+  danger: "#F0796B", border: "#2C302A", muted: "#9BA39A",
 };
+
+function isValidPhone(phone) {
+  const digits = (phone || "").replace(/[^\d]/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+}
 
 function firstItem(group) { return group?.items?.[0]; }
 function firstVariant(item) { return item?.variants?.[0]; }
@@ -28,33 +34,53 @@ function computeAddOnLinePrice(item, style, sevOptionId, selectedAddOnIds) {
   return base + sevExtra + addOnsExtra;
 }
 
+function defaultSizeId(item) { return (item.sizes || [])[0]?.id; }
+function defaultFlavorId(item) {
+  const found = (item.flavors || []).find((f) => f.defaultChecked);
+  return found ? found.id : (item.flavors || [])[0]?.id;
+}
+function computeSizeFlavorPrice(item, sizeId, flavorId) {
+  const size = (item.sizes || []).find((s) => s.id === sizeId);
+  if (!size) return 0;
+  const flavor = (item.flavors || []).find((f) => f.id === flavorId);
+  const extra = flavor ? Number(flavor.extraBySize?.[sizeId] || 0) : 0;
+  return Number(size.basePrice) + extra;
+}
+
 function OrderLine({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
   const isAddOnItem = Boolean(item?.addOnMode);
-  const hasVariants = !isAddOnItem && item && item.variants.length > 1;
-  const variant = !isAddOnItem ? item?.variants.find((v) => v.id === line.variantId) : null;
+  const isSizeFlavorItem = Boolean(item?.sizeFlavorMode);
+  const hasVariants = !isAddOnItem && !isSizeFlavorItem && item && item.variants.length > 1;
+  const variant = (!isAddOnItem && !isSizeFlavorItem) ? item?.variants.find((v) => v.id === line.variantId) : null;
   const total = isAddOnItem
     ? computeAddOnLinePrice(item, line.style || "Regular", line.sevOptionId, line.selectedAddOnIds || []) * (Number(line.qty) || 0)
+    : isSizeFlavorItem
+    ? computeSizeFlavorPrice(item, line.sizeId, line.flavorId) * (Number(line.qty) || 0)
     : (variant?.price || 0) * (Number(line.qty) || 0);
 
   const onGroupChange = (groupId) => {
     const g = menu.find((mg) => mg.id === groupId);
     const it = g?.items?.[0];
     if (it?.addOnMode) {
-      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined });
+      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined });
+    } else if (it?.sizeFlavorMode) {
+      onChange({ ...line, groupId, itemId: it.id, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
     } else {
       const v = it?.variants?.[0];
-      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
     }
   };
   const onItemChange = (itemId) => {
     const it = group?.items.find((i) => i.id === itemId);
     if (it?.addOnMode) {
-      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined });
+      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined });
+    } else if (it?.sizeFlavorMode) {
+      onChange({ ...line, itemId, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
     } else {
       const v = it?.variants?.[0];
-      onChange({ ...line, itemId, variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
+      onChange({ ...line, itemId, variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
     }
   };
   const toggleAddOn = (addOnId) => {
@@ -95,12 +121,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
             {(item.sevOptions || []).map((s) => (
               <button key={s.id} onClick={() => onChange({ ...line, sevOptionId: s.id })}
-                style={{
-                  display: "flex", justifyContent: "space-between", alignItems: "center",
-                  padding: "8px 12px", borderRadius: 8, textAlign: "left",
-                  border: `1px solid ${line.sevOptionId === s.id ? C.moss : C.border}`, background: line.sevOptionId === s.id ? C.mossTint : C.card,
-                  color: line.sevOptionId === s.id ? "#8FE0B3" : C.muted, fontSize: 13, cursor: "pointer",
-                }}>
+                style={{ ...choiceRow, ...(line.sevOptionId === s.id ? choiceRowActive : {}) }}>
                 <span>{s.name}</span>
                 <span>{s.extra > 0 ? `+${money(s.extra)}` : "included"}</span>
               </button>
@@ -111,15 +132,32 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
             {(item.addOns || []).map((a) => {
               const checked = (line.selectedAddOnIds || []).includes(a.id);
               return (
-                <button key={a.id} onClick={() => toggleAddOn(a.id)}
-                  style={{
-                    display: "flex", justifyContent: "space-between", alignItems: "center",
-                    padding: "8px 12px", borderRadius: 8, textAlign: "left",
-                    border: `1px solid ${checked ? C.moss : C.border}`, background: checked ? C.mossTint : C.card,
-                    color: checked ? "#8FE0B3" : C.muted, fontSize: 13, cursor: "pointer",
-                  }}>
+                <button key={a.id} onClick={() => toggleAddOn(a.id)} style={{ ...choiceRow, ...(checked ? choiceRowActive : {}) }}>
                   <span>{checked ? "✓ " : ""}{a.name}</span>
                   <span>+{money(a.extra)}</span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      ) : isSizeFlavorItem ? (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Size</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {(item.sizes || []).map((s) => (
+              <button key={s.id} onClick={() => onChange({ ...line, sizeId: s.id })} style={{ ...pill, ...(line.sizeId === s.id ? pillActive : {}) }}>
+                {s.name} — {money(s.basePrice)}
+              </button>
+            ))}
+          </div>
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Flavor</label>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {(item.flavors || []).map((f) => {
+              const extra = Number(f.extraBySize?.[line.sizeId] || 0);
+              return (
+                <button key={f.id} onClick={() => onChange({ ...line, flavorId: f.id })} style={{ ...choiceRow, ...(line.flavorId === f.id ? choiceRowActive : {}) }}>
+                  <span>{f.name}</span>
+                  <span>{extra > 0 ? `+${money(extra)}` : "included"}</span>
                 </button>
               );
             })}
@@ -137,7 +175,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
           </div>
         </>
       )}
-      {!isAddOnItem && !hasVariants && item && (
+      {!isAddOnItem && !isSizeFlavorItem && !hasVariants && item && (
         <div style={{ marginTop: 10, fontSize: 13, color: C.muted }}>Price: <span style={{ color: C.moss, fontWeight: 600 }}>{money(item.variants[0]?.price)}</span></div>
       )}
 
@@ -156,54 +194,66 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
   );
 }
 
-function PriceList({ menu }) {
-  const [open, setOpen] = useState(false);
+const CATEGORY_EMOJI = { "Surti Aloopuri": "🥔", "Coco": "🥤" };
+
+function FullMenuTab({ menu }) {
   return (
-    <div style={{ marginTop: 16 }}>
-      <button onClick={() => setOpen((v) => !v)} style={{
-        width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
-        background: "transparent", border: `1px dashed ${C.ember}`, borderRadius: 10, padding: "10px 14px",
-        fontSize: 13, color: C.ember, cursor: "pointer",
-      }}>
-        <span>See full price list</span>
-        <ChevronDown size={16} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
-      </button>
-      {open && (
-        <div style={{ marginTop: 10, background: C.card, borderRadius: 10, padding: "12px 14px" }}>
-          {menu.map((g) => (
-            <div key={g.id} style={{ marginBottom: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{g.name}</div>
-              {g.items.map((it) => (
-                <div key={it.id} style={{ marginBottom: 6 }}>
-                  {it.addOnMode ? (
-                    <>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, padding: "2px 0" }}>
-                        <span>Base (Regular / Crunchy)</span><span>{money(it.basePriceRegular)} / {money(it.basePriceCrunchy)}</span>
-                      </div>
-                      {(it.sevOptions || []).filter((s) => s.extra > 0).map((s) => (
-                        <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, padding: "2px 0" }}>
-                          <span>{s.name}</span><span>+{money(s.extra)}</span>
-                        </div>
-                      ))}
-                      {(it.addOns || []).map((a) => (
-                        <div key={a.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, padding: "2px 0" }}>
-                          <span>{a.name}</span><span>+{money(a.extra)}</span>
-                        </div>
-                      ))}
-                    </>
-                  ) : (
-                    (it.variants || []).map((v) => (
-                      <div key={v.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, padding: "2px 0" }}>
-                        <span>{it.name}{v.label ? ` (${v.label})` : ""}</span><span>{money(v.price)}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              ))}
+    <div>
+      <div style={{ textAlign: "center", marginBottom: 18 }}>
+        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, fontWeight: 700 }}>Our Menu ✨</div>
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>Good food. Good mood. Good moments. 🧡</div>
+      </div>
+      {menu.map((g) => (
+        <div key={g.id} style={{ ...card, marginBottom: 16, borderTop: `3px solid ${C.ember}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <span style={{ fontSize: 22 }}>{CATEGORY_EMOJI[g.name] || "⭐"}</span>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700 }}>{g.name}</div>
+          </div>
+          {g.items.map((it) => (
+            <div key={it.id} style={{ marginBottom: 14 }}>
+              {it.addOnMode ? (
+                <>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: C.mossDark, marginBottom: 6 }}>{it.name}</div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
+                    <span>Base (Regular / Crunchy)</span><span style={{ fontWeight: 700 }}>{money(it.basePriceRegular)} / {money(it.basePriceCrunchy)}</span>
+                  </div>
+                  {(it.sevOptions || []).filter((s) => s.extra > 0).map((s) => (
+                    <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
+                      <span>{s.name}</span><span>+{money(s.extra)}</span>
+                    </div>
+                  ))}
+                  {(it.addOns || []).map((a) => (
+                    <div key={a.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
+                      <span>{a.name}</span><span>+{money(a.extra)}</span>
+                    </div>
+                  ))}
+                </>
+              ) : it.sizeFlavorMode ? (
+                <>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: C.mossDark, marginBottom: 6 }}>{it.name}</div>
+                  {(it.sizes || []).map((s) => (
+                    <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
+                      <span>{s.name}</span><span style={{ fontWeight: 700 }}>{money(s.basePrice)}</span>
+                    </div>
+                  ))}
+                  {(it.flavors || []).filter((f) => Object.values(f.extraBySize || {}).some((v) => Number(v) > 0)).map((f) => (
+                    <div key={f.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
+                      <span>{f.name}</span>
+                      <span>{(it.sizes || []).map((s) => `+${money(f.extraBySize?.[s.id] || 0)}`).join(" / ")}</span>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                (it.variants || []).map((v) => (
+                  <div key={v.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
+                    <span>{it.name}{v.label ? ` (${v.label})` : ""}</span><span style={{ fontWeight: 700 }}>{money(v.price)}</span>
+                  </div>
+                ))
+              )}
             </div>
           ))}
         </div>
-      )}
+      ))}
     </div>
   );
 }
@@ -211,7 +261,9 @@ function PriceList({ menu }) {
 export default function PublicOrderPage() {
   const [menu, setMenu] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [tab, setTab] = useState("order");
   const [customer, setCustomer] = useState("");
+  const [phone, setPhone] = useState("");
   const [website, setWebsite] = useState("");
   const [lines, setLines] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -220,7 +272,9 @@ export default function PublicOrderPage() {
 
   useEffect(() => {
     const savedName = typeof window !== "undefined" ? localStorage.getItem("surti_customer_name") : "";
+    const savedPhone = typeof window !== "undefined" ? localStorage.getItem("surti_customer_phone") : "";
     if (savedName) setCustomer(savedName);
+    if (savedPhone) setPhone(savedPhone);
 
     fetch("/api/public-menu")
       .then((r) => r.json())
@@ -231,6 +285,8 @@ export default function PublicOrderPage() {
         if (g) {
           if (it?.addOnMode) {
             setLines([{ id: uid(), groupId: g.id, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
+          } else if (it?.sizeFlavorMode) {
+            setLines([{ id: uid(), groupId: g.id, itemId: it.id, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 }]);
           } else {
             const v = firstVariant(it);
             setLines([{ id: uid(), groupId: g.id, itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
@@ -249,6 +305,10 @@ export default function PublicOrderPage() {
       setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
       return;
     }
+    if (it?.sizeFlavorMode) {
+      setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 }]);
+      return;
+    }
     const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
   };
@@ -256,23 +316,32 @@ export default function PublicOrderPage() {
   const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
   const total = lines.reduce((s, l) => {
     const it = getItemFor(l);
-    const price = it?.addOnMode ? computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || []) : (getVariant(l)?.price || 0);
+    const price = it?.addOnMode
+      ? computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || [])
+      : it?.sizeFlavorMode
+      ? computeSizeFlavorPrice(it, l.sizeId, l.flavorId)
+      : (getVariant(l)?.price || 0);
     return s + price * (Number(l.qty) || 0);
   }, 0);
 
   const submit = async () => {
     if (!customer.trim()) { setError("Please enter your name."); return; }
+    if (!isValidPhone(phone)) { setError("Please enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
         if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
-        if (it?.addOnMode) return true;
+        if (it?.addOnMode) return Boolean(l.sevOptionId);
+        if (it?.sizeFlavorMode) return Boolean(l.sizeId);
         return Boolean(l.variantId);
       })
       .map((l) => {
         const it = getItemFor(l);
         if (it?.addOnMode) {
           return { groupId: l.groupId, itemId: l.itemId, style: l.style || "Regular", sevOptionId: l.sevOptionId, addOnIds: l.selectedAddOnIds || [], qty: Number(l.qty) };
+        }
+        if (it?.sizeFlavorMode) {
+          return { groupId: l.groupId, itemId: l.itemId, sizeId: l.sizeId, flavorId: l.flavorId, qty: Number(l.qty) };
         }
         return { groupId: l.groupId, itemId: l.itemId, variantId: l.variantId, qty: Number(l.qty) };
       });
@@ -283,11 +352,14 @@ export default function PublicOrderPage() {
       const res = await fetch("/api/public-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ customer: customer.trim(), items, website }),
+        body: JSON.stringify({ customer: customer.trim(), phone: phone.trim(), items, website }),
       });
       const data = await res.json();
       if (data.error) { setError(data.error); setSubmitting(false); return; }
-      if (typeof window !== "undefined") localStorage.setItem("surti_customer_name", customer.trim());
+      if (typeof window !== "undefined") {
+        localStorage.setItem("surti_customer_name", customer.trim());
+        localStorage.setItem("surti_customer_phone", phone.trim());
+      }
       setSubmitted(true);
     } catch {
       setError("Something went wrong submitting your order. Please try again.");
@@ -299,7 +371,7 @@ export default function PublicOrderPage() {
     return (
       <div style={wrap}>
         <div style={{ ...card, marginTop: 40, textAlign: "center" }}>
-          <div style={{ color: "#F0796B", fontWeight: 600, marginBottom: 8 }}>Couldn't load the menu</div>
+          <div style={{ color: C.danger, fontWeight: 600, marginBottom: 8 }}>Couldn't load the menu</div>
           <div style={{ color: C.muted, fontSize: 14 }}>{loadError}</div>
         </div>
       </div>
@@ -327,26 +399,40 @@ export default function PublicOrderPage() {
         input:focus{outline:none;border-color:${C.ember} !important}
       `}</style>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
         <img src="/logo.png" alt="Gully Gourmet logo" style={{ width: 46, height: 46, borderRadius: "50%", flexShrink: 0, objectFit: "cover" }} />
         <div>
           <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700, margin: 0 }}>Gully Gourmet</h1
-          ><div style={{ fontSize: 12, color: C.muted }}>Surti Aloopuri — place your order below</div>
+          ><div style={{ fontSize: 12, color: C.muted }}>Surti Aloopuri — good food, good mood, good moments 🧡</div>
         </div>
       </div>
+
+      {!submitted && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <button onClick={() => setTab("order")} style={{ ...tabBtn, ...(tab === "order" ? tabBtnActive : {}) }}>🛒 Order</button>
+          <button onClick={() => setTab("menu")} style={{ ...tabBtn, ...(tab === "menu" ? tabBtnActive : {}) }}>📋 Full Menu</button>
+        </div>
+      )}
 
       {submitted ? (
         <div style={{ ...card, textAlign: "center", padding: "32px 20px" }}>
           <div style={{ width: 52, height: 52, borderRadius: "50%", background: C.mossTint, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px" }}>
             <Check size={26} color={C.moss} />
           </div>
-          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Thanks for your order, {customer}!</div>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Thanks for your order, {customer}! 🎉</div>
           <div style={{ fontSize: 14, color: C.muted }}>We've got it — pay when you pick up.</div>
         </div>
+      ) : tab === "menu" ? (
+        <FullMenuTab menu={menu} />
       ) : (
         <div style={card}>
           <label style={fieldLabel}>Your name</label>
           <input style={input} placeholder="e.g. Ramesh" value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
+          <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+          <input type="tel" style={input} placeholder="e.g. (551) 359-1166" value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
+          {phone.trim() && !isValidPhone(phone) && (
+            <div style={{ fontSize: 12, color: C.danger, marginTop: 4 }}>Enter at least 10 digits.</div>
+          )}
 
           <div aria-hidden="true" style={{ position: "absolute", left: "-9999px", width: 1, height: 1, overflow: "hidden" }}>
             <label htmlFor="website">Leave this field empty</label>
@@ -361,7 +447,7 @@ export default function PublicOrderPage() {
           </div>
           <button onClick={addLine} style={ghostBtn}><Plus size={14} /> Add another item</button>
 
-          {error && <div style={{ color: "#F0796B", fontSize: 13, marginTop: 10 }}>{error}</div>}
+          {error && <div style={{ color: C.danger, fontSize: 13, marginTop: 10 }}>{error}</div>}
 
           <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
@@ -372,8 +458,6 @@ export default function PublicOrderPage() {
               {submitting ? <Loader2 className="om-spin" size={16} /> : <Plus size={16} />} {submitting ? "Sending..." : "Send order"}
             </button>
           </div>
-
-          <PriceList menu={menu} />
         </div>
       )}
     </div>
@@ -391,3 +475,7 @@ const iconBtn = { display: "flex", alignItems: "center", justifyContent: "center
 const stepBtn = { width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" };
 const pill = { padding: "6px 13px", borderRadius: 999, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 13, cursor: "pointer" };
 const pillActive = { background: C.mossTint, borderColor: C.moss, color: "#8FE0B3", fontWeight: 700 };
+const choiceRow = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, textAlign: "left", border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 13, cursor: "pointer" };
+const choiceRowActive = { borderColor: C.moss, background: C.mossTint, color: "#8FE0B3" };
+const tabBtn = { flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 14, fontWeight: 600, cursor: "pointer" };
+const tabBtnActive = { background: C.moss, borderColor: C.moss, color: "#FAF6EE" };
