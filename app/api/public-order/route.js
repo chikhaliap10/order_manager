@@ -69,32 +69,10 @@ export async function POST(req) {
       const qty = Number(reqItem.qty);
       if (!group || !item || !(qty > 0)) continue;
 
-      if (item.addOnMode) {
-        const style = reqItem.style === "Crunchy" ? "Crunchy" : "Regular";
-        const sevOption = (item.sevOptions || []).find((s) => s.id === reqItem.sevOptionId);
-        if (!sevOption) continue;
-        const addOnIds = Array.isArray(reqItem.addOnIds) ? reqItem.addOnIds : [];
-        const selectedAddOns = (item.addOns || []).filter((a) => addOnIds.includes(a.id));
-        const base = style === "Crunchy" ? Number(item.basePriceCrunchy) : Number(item.basePriceRegular);
-        const price = base + Number(sevOption.extra) + selectedAddOns.reduce((s, a) => s + Number(a.extra), 0);
-        const parts = [style, sevOption.name, ...selectedAddOns.map((a) => a.name)];
-        totalPlates += qty;
-        resolvedItems.push({ name: item.name, variantLabel: parts.join(" + "), price, qty });
-      } else if (item.sizeFlavorMode) {
-        const size = (item.sizes || []).find((s) => s.id === reqItem.sizeId);
-        if (!size) continue;
-        const flavor = (item.flavors || []).find((f) => f.id === reqItem.flavorId);
-        const extra = flavor ? Number(flavor.extraBySize?.[size.id] || 0) : 0;
-        const price = Number(size.basePrice) + extra;
-        const variantLabel = [size.name, flavor?.name].filter(Boolean).join(" + ");
-        totalPlates += qty;
-        resolvedItems.push({ name: item.name, variantLabel, price, qty });
-      } else {
-        const variant = item.variants.find((v) => v.id === reqItem.variantId);
-        if (!variant) continue;
-        totalPlates += qty;
-        resolvedItems.push({ name: item.name, variantLabel: variant.label || "", price: variant.price, qty });
-      }
+      const variant = item.variants.find((v) => v.id === reqItem.variantId);
+      if (!variant) continue;
+      totalPlates += qty;
+      resolvedItems.push({ name: item.name, variantLabel: variant.label || "", price: variant.price, qty });
     }
 
     if (resolvedItems.length === 0) {

@@ -104,19 +104,7 @@ export async function POST(req) {
       if (action === "add-item" || action === "update-item") {
         const item = payload?.item;
         if (!item?.name?.trim()) return badRequest("Item name is required.");
-        if (item.addOnMode) {
-          if (!(Number(item.basePriceRegular) > 0)) return badRequest("A base Regular price is required.");
-          if (!Array.isArray(item.sevOptions) || item.sevOptions.length === 0) {
-            return badRequest("At least one sev option is required.");
-          }
-        } else if (item.sizeFlavorMode) {
-          if (!Array.isArray(item.sizes) || item.sizes.length === 0 || !item.sizes.some((s) => Number(s.basePrice) > 0)) {
-            return badRequest("At least one size with a valid price is required.");
-          }
-          if (!Array.isArray(item.flavors) || item.flavors.length === 0) {
-            return badRequest("At least one flavor is required.");
-          }
-        } else if (!Array.isArray(item.variants) || item.variants.length === 0 || !item.variants.some((v) => Number(v.price) > 0)) {
+        if (!Array.isArray(item.variants) || item.variants.length === 0 || !item.variants.some((v) => Number(v.price) > 0)) {
           return badRequest("At least one price is required.");
         }
       }

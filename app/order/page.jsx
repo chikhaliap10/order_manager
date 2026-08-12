@@ -19,74 +19,26 @@ function isValidPhone(phone) {
 
 function firstItem(group) { return group?.items?.[0]; }
 function firstVariant(item) { return item?.variants?.[0]; }
-const STYLE_OPTIONS = ["Regular", "Crunchy"];
 
-function basePriceAt(item, style) { return style === "Crunchy" ? Number(item.basePriceCrunchy) : Number(item.basePriceRegular); }
-function defaultSevOptionId(item) {
-  const found = (item.sevOptions || []).find((s) => s.defaultChecked);
-  return found ? found.id : (item.sevOptions || [])[0]?.id;
-}
-function computeAddOnLinePrice(item, style, sevOptionId, selectedAddOnIds) {
-  const base = basePriceAt(item, style);
-  const sevOption = (item.sevOptions || []).find((s) => s.id === sevOptionId);
-  const sevExtra = sevOption ? Number(sevOption.extra) : 0;
-  const addOnsExtra = (item.addOns || []).filter((a) => selectedAddOnIds.includes(a.id)).reduce((s, a) => s + Number(a.extra), 0);
-  return base + sevExtra + addOnsExtra;
-}
-
-function defaultSizeId(item) { return (item.sizes || [])[0]?.id; }
-function defaultFlavorId(item) {
-  const found = (item.flavors || []).find((f) => f.defaultChecked);
-  return found ? found.id : (item.flavors || [])[0]?.id;
-}
-function computeSizeFlavorPrice(item, sizeId, flavorId) {
-  const size = (item.sizes || []).find((s) => s.id === sizeId);
-  if (!size) return 0;
-  const flavor = (item.flavors || []).find((f) => f.id === flavorId);
-  const extra = flavor ? Number(flavor.extraBySize?.[sizeId] || 0) : 0;
-  return Number(size.basePrice) + extra;
-}
-
+// Every menu entry -- base plates, sides, and every topping/add-on alike
+// -- is just its own simple item with its own price options, ordered
+// independently with its own quantity. Uber-Eats style: no nesting.
 function OrderLine({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
-  const isAddOnItem = Boolean(item?.addOnMode);
-  const isSizeFlavorItem = Boolean(item?.sizeFlavorMode);
-  const hasVariants = !isAddOnItem && !isSizeFlavorItem && item && item.variants.length > 1;
-  const variant = (!isAddOnItem && !isSizeFlavorItem) ? item?.variants.find((v) => v.id === line.variantId) : null;
-  const total = isAddOnItem
-    ? computeAddOnLinePrice(item, line.style || "Regular", line.sevOptionId, line.selectedAddOnIds || []) * (Number(line.qty) || 0)
-    : isSizeFlavorItem
-    ? computeSizeFlavorPrice(item, line.sizeId, line.flavorId) * (Number(line.qty) || 0)
-    : (variant?.price || 0) * (Number(line.qty) || 0);
+  const hasVariants = item && item.variants.length > 1;
+  const variant = item?.variants.find((v) => v.id === line.variantId);
+  const total = (variant?.price || 0) * (Number(line.qty) || 0);
 
   const onGroupChange = (groupId) => {
     const g = menu.find((mg) => mg.id === groupId);
-    const it = g?.items?.[0];
-    if (it?.addOnMode) {
-      onChange({ ...line, groupId, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined });
-    } else if (it?.sizeFlavorMode) {
-      onChange({ ...line, groupId, itemId: it.id, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
-    } else {
-      const v = it?.variants?.[0];
-      onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
-    }
+    const it = g?.items?.[0]; const v = it?.variants?.[0];
+    onChange({ ...line, groupId, itemId: it?.id || "", variantId: v?.id || "" });
   };
   const onItemChange = (itemId) => {
     const it = group?.items.find((i) => i.id === itemId);
-    if (it?.addOnMode) {
-      onChange({ ...line, itemId, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], variantId: undefined, sizeId: undefined, flavorId: undefined });
-    } else if (it?.sizeFlavorMode) {
-      onChange({ ...line, itemId, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), variantId: undefined, style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined });
-    } else {
-      const v = it?.variants?.[0];
-      onChange({ ...line, itemId, variantId: v?.id || "", style: undefined, sevOptionId: undefined, selectedAddOnIds: undefined, sizeId: undefined, flavorId: undefined });
-    }
-  };
-  const toggleAddOn = (addOnId) => {
-    const current = line.selectedAddOnIds || [];
-    const next = current.includes(addOnId) ? current.filter((id) => id !== addOnId) : [...current, addOnId];
-    onChange({ ...line, selectedAddOnIds: next });
+    const v = it?.variants?.[0];
+    onChange({ ...line, itemId, variantId: v?.id || "" });
   };
 
   return (
@@ -106,64 +58,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
           <button key={i.id} onClick={() => onItemChange(i.id)} style={{ ...pill, ...(line.itemId === i.id ? pillActive : {}) }}>{i.name}</button>
         ))}
       </div>
-
-      {isAddOnItem ? (
-        <>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-            {STYLE_OPTIONS.map((s) => (
-              <button key={s} onClick={() => onChange({ ...line, style: s })} style={{ ...pill, ...((line.style || "Regular") === s ? pillActive : {}) }}>
-                {s} — {money(basePriceAt(item, s))}
-              </button>
-            ))}
-          </div>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Sev</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-            {(item.sevOptions || []).map((s) => (
-              <button key={s.id} onClick={() => onChange({ ...line, sevOptionId: s.id })}
-                style={{ ...choiceRow, ...(line.sevOptionId === s.id ? choiceRowActive : {}) }}>
-                <span>{s.name}</span>
-                <span>{s.extra > 0 ? `+${money(s.extra)}` : "included"}</span>
-              </button>
-            ))}
-          </div>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Add-ons (pick any number)</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-            {(item.addOns || []).map((a) => {
-              const checked = (line.selectedAddOnIds || []).includes(a.id);
-              return (
-                <button key={a.id} onClick={() => toggleAddOn(a.id)} style={{ ...choiceRow, ...(checked ? choiceRowActive : {}) }}>
-                  <span>{checked ? "✓ " : ""}{a.name}</span>
-                  <span>+{money(a.extra)}</span>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      ) : isSizeFlavorItem ? (
-        <>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Size</label>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-            {(item.sizes || []).map((s) => (
-              <button key={s.id} onClick={() => onChange({ ...line, sizeId: s.id })} style={{ ...pill, ...(line.sizeId === s.id ? pillActive : {}) }}>
-                {s.name} — {money(s.basePrice)}
-              </button>
-            ))}
-          </div>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Flavor</label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-            {(item.flavors || []).map((f) => {
-              const extra = Number(f.extraBySize?.[line.sizeId] || 0);
-              return (
-                <button key={f.id} onClick={() => onChange({ ...line, flavorId: f.id })} style={{ ...choiceRow, ...(line.flavorId === f.id ? choiceRowActive : {}) }}>
-                  <span>{f.name}</span>
-                  <span>{extra > 0 ? `+${money(extra)}` : "included"}</span>
-                </button>
-              );
-            })}
-          </div>
-        </>
-      ) : hasVariants && (
+      {hasVariants && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
@@ -175,7 +70,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
           </div>
         </>
       )}
-      {!isAddOnItem && !isSizeFlavorItem && !hasVariants && item && (
+      {!hasVariants && item && (
         <div style={{ marginTop: 10, fontSize: 13, color: C.muted }}>Price: <span style={{ color: C.moss, fontWeight: 600 }}>{money(item.variants[0]?.price)}</span></div>
       )}
 
@@ -210,46 +105,12 @@ function FullMenuTab({ menu }) {
             <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700 }}>{g.name}</div>
           </div>
           {g.items.map((it) => (
-            <div key={it.id} style={{ marginBottom: 14 }}>
-              {it.addOnMode ? (
-                <>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: C.mossDark, marginBottom: 6 }}>{it.name}</div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
-                    <span>Base (Regular / Crunchy)</span><span style={{ fontWeight: 700 }}>{money(it.basePriceRegular)} / {money(it.basePriceCrunchy)}</span>
-                  </div>
-                  {(it.sevOptions || []).filter((s) => s.extra > 0).map((s) => (
-                    <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
-                      <span>{s.name}</span><span>+{money(s.extra)}</span>
-                    </div>
-                  ))}
-                  {(it.addOns || []).map((a) => (
-                    <div key={a.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
-                      <span>{a.name}</span><span>+{money(a.extra)}</span>
-                    </div>
-                  ))}
-                </>
-              ) : it.sizeFlavorMode ? (
-                <>
-                  <div style={{ fontSize: 14, fontWeight: 600, color: C.mossDark, marginBottom: 6 }}>{it.name}</div>
-                  {(it.sizes || []).map((s) => (
-                    <div key={s.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
-                      <span>{s.name}</span><span style={{ fontWeight: 700 }}>{money(s.basePrice)}</span>
-                    </div>
-                  ))}
-                  {(it.flavors || []).filter((f) => Object.values(f.extraBySize || {}).some((v) => Number(v) > 0)).map((f) => (
-                    <div key={f.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "5px 10px", color: C.muted }}>
-                      <span>{f.name}</span>
-                      <span>{(it.sizes || []).map((s) => `+${money(f.extraBySize?.[s.id] || 0)}`).join(" / ")}</span>
-                    </div>
-                  ))}
-                </>
-              ) : (
-                (it.variants || []).map((v) => (
-                  <div key={v.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
-                    <span>{it.name}{v.label ? ` (${v.label})` : ""}</span><span style={{ fontWeight: 700 }}>{money(v.price)}</span>
-                  </div>
-                ))
-              )}
+            <div key={it.id} style={{ marginBottom: 10 }}>
+              {it.variants.map((v) => (
+                <div key={v.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
+                  <span>{it.name}{v.label ? ` (${v.label})` : ""}</span><span style={{ fontWeight: 700 }}>{money(v.price)}</span>
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -281,17 +142,8 @@ export default function PublicOrderPage() {
       .then((data) => {
         if (data.error) { setLoadError(data.error); return; }
         setMenu(data.menu);
-        const g = data.menu[0]; const it = firstItem(g);
-        if (g) {
-          if (it?.addOnMode) {
-            setLines([{ id: uid(), groupId: g.id, itemId: it.id, style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
-          } else if (it?.sizeFlavorMode) {
-            setLines([{ id: uid(), groupId: g.id, itemId: it.id, sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 }]);
-          } else {
-            const v = firstVariant(it);
-            setLines([{ id: uid(), groupId: g.id, itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
-          }
-        }
+        const g = data.menu[0]; const it = firstItem(g); const v = firstVariant(it);
+        if (g) setLines([{ id: uid(), groupId: g.id, itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
       })
       .catch(() => setLoadError("Could not load the menu. Please check your connection and try again."));
   }, []);
@@ -300,51 +152,18 @@ export default function PublicOrderPage() {
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const getItemFor = (l) => menu?.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
   const addLine = () => {
-    const g = menu[0]; const it = firstItem(g);
-    if (it?.addOnMode) {
-      setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", style: "Regular", sevOptionId: defaultSevOptionId(it), selectedAddOnIds: [], qty: 1 }]);
-      return;
-    }
-    if (it?.sizeFlavorMode) {
-      setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", sizeId: defaultSizeId(it), flavorId: defaultFlavorId(it), qty: 1 }]);
-      return;
-    }
-    const v = firstVariant(it);
+    const g = menu[0]; const it = firstItem(g); const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1 }]);
   };
 
   const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
-  const total = lines.reduce((s, l) => {
-    const it = getItemFor(l);
-    const price = it?.addOnMode
-      ? computeAddOnLinePrice(it, l.style || "Regular", l.sevOptionId, l.selectedAddOnIds || [])
-      : it?.sizeFlavorMode
-      ? computeSizeFlavorPrice(it, l.sizeId, l.flavorId)
-      : (getVariant(l)?.price || 0);
-    return s + price * (Number(l.qty) || 0);
-  }, 0);
+  const total = lines.reduce((s, l) => s + (getVariant(l)?.price || 0) * (Number(l.qty) || 0), 0);
 
   const submit = async () => {
     if (!customer.trim()) { setError("Please enter your name."); return; }
     if (!isValidPhone(phone)) { setError("Please enter a valid phone number (at least 10 digits)."); return; }
-    const items = lines
-      .filter((l) => {
-        const it = getItemFor(l);
-        if (!l.groupId || !l.itemId || !(Number(l.qty) > 0)) return false;
-        if (it?.addOnMode) return Boolean(l.sevOptionId);
-        if (it?.sizeFlavorMode) return Boolean(l.sizeId);
-        return Boolean(l.variantId);
-      })
-      .map((l) => {
-        const it = getItemFor(l);
-        if (it?.addOnMode) {
-          return { groupId: l.groupId, itemId: l.itemId, style: l.style || "Regular", sevOptionId: l.sevOptionId, addOnIds: l.selectedAddOnIds || [], qty: Number(l.qty) };
-        }
-        if (it?.sizeFlavorMode) {
-          return { groupId: l.groupId, itemId: l.itemId, sizeId: l.sizeId, flavorId: l.flavorId, qty: Number(l.qty) };
-        }
-        return { groupId: l.groupId, itemId: l.itemId, variantId: l.variantId, qty: Number(l.qty) };
-      });
+    const items = lines.filter((l) => l.groupId && l.itemId && l.variantId && Number(l.qty) > 0)
+      .map((l) => ({ groupId: l.groupId, itemId: l.itemId, variantId: l.variantId, qty: Number(l.qty) }));
     if (items.length === 0) { setError("Please add at least one item."); return; }
     setError("");
     setSubmitting(true);
@@ -475,7 +294,5 @@ const iconBtn = { display: "flex", alignItems: "center", justifyContent: "center
 const stepBtn = { width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 16, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" };
 const pill = { padding: "6px 13px", borderRadius: 999, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 13, cursor: "pointer" };
 const pillActive = { background: C.mossTint, borderColor: C.moss, color: "#8FE0B3", fontWeight: 700 };
-const choiceRow = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderRadius: 8, textAlign: "left", border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 13, cursor: "pointer" };
-const choiceRowActive = { borderColor: C.moss, background: C.mossTint, color: "#8FE0B3" };
 const tabBtn = { flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.card, color: C.muted, fontSize: 14, fontWeight: 600, cursor: "pointer" };
 const tabBtnActive = { background: C.moss, borderColor: C.moss, color: "#FAF6EE" };
