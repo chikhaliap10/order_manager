@@ -1,6 +1,6 @@
 import { getKey, setKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
-import { uid } from "../../../lib/defaults";
+import { uid, defaultMenu } from "../../../lib/defaults";
 
 export const dynamic = "force-dynamic";
 
@@ -111,7 +111,9 @@ export async function POST(req) {
 
       let menu = await getOrInitMenu();
 
-      if (action === "add-group") {
+      if (action === "reset") {
+        menu = defaultMenu();
+      } else if (action === "add-group") {
         menu = [...menu, { id: uid(), name: payload.name.trim(), items: [] }];
       } else if (action === "rename-group") {
         menu = menu.map((g) => (g.id === payload.groupId ? { ...g, name: payload.name.trim() } : g));

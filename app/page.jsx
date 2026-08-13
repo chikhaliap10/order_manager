@@ -359,7 +359,8 @@ export default function HomePage() {
             onAddItem={(groupId, item) => act("menu", "add-item", { groupId, item })}
             onUpdateItem={(groupId, item) => act("menu", "update-item", { groupId, item })}
             onRemoveItem={(groupId, itemId) => act("menu", "remove-item", { groupId, itemId })}
-            onRenamePartner={(id, name) => act("partners", "rename", { id, name })} />
+            onRenamePartner={(id, name) => act("partners", "rename", { id, name })}
+            onResetMenu={() => act("menu", "reset", {})} />
         )}
       </div>
     </div>
@@ -1843,7 +1844,36 @@ function CustomerOrderLinkCard() {
   );
 }
 
-function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner }) {
+function ResetMenuButton({ onReset }) {
+  const [confirming, setConfirming] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  const doReset = async () => {
+    setResetting(true);
+    await onReset();
+    setResetting(false);
+    setConfirming(false);
+  };
+
+  if (!confirming) {
+    return (
+      <button onClick={() => setConfirming(true)} style={{ ...ghostBtn, marginTop: 0, borderColor: C.danger, color: C.danger }} className="om-btn">
+        Reset menu to defaults
+      </button>
+    );
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12, color: C.danger }}>This replaces your entire menu -- any custom items or prices will be lost. Sure?</span>
+      <button onClick={() => setConfirming(false)} disabled={resetting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+      <button onClick={doReset} disabled={resetting} style={{ ...primaryBtn, marginTop: 0, width: "auto", background: C.danger }} className="om-btn">
+        {resetting ? <Loader2 className="om-spin" size={14} /> : null} Yes, reset it
+      </button>
+    </div>
+  );
+}
+
+function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner, onResetMenu }) {
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
@@ -1868,7 +1898,10 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, on
         </div>
         <button onClick={() => exportBackup(backupData)} style={{ ...primaryBtn, width: "auto", marginTop: 0 }} className="om-btn"><Download size={15} /> Download backup</button>
       </div>
-      <div style={{ ...cardTitle, marginTop: 24 }}>Menu categories</div>
+      <div style={{ ...cardTitle, marginTop: 24, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <span>Menu categories</span>
+        <ResetMenuButton onReset={onResetMenu} />
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         {menu.map((g) => (
           <GroupCard key={g.id} group={g}
