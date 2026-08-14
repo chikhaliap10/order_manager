@@ -24,6 +24,15 @@ function tsToDateString(ts) {
 function todayDateString() {
   return tsToDateString(Date.now());
 }
+// Referenced at both order-creation and order-edit phone fields but was
+// never actually defined -- same bug class as the earlier
+// GroupNameEditor crash (a used-but-undefined reference). "Valid" here
+// just means at least 10 digits once formatting characters are stripped,
+// matching the error message both call sites already show.
+function isValidPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  return digits.length >= 10;
+}
 const QTY_PRESETS = [5, 10, 15, 20, 25];
 
 const C = {
