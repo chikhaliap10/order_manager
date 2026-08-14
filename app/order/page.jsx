@@ -26,8 +26,8 @@ function firstVariant(item) { return item?.variants?.[0]; }
 function OrderLine({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
-  const hasVariants = item && item.variants.length > 1;
-  const variant = item?.variants.find((v) => v.id === line.variantId);
+  const hasVariants = item && (item.variants?.length || 0) > 1;
+  const variant = item?.variants?.find((v) => v.id === line.variantId);
   const total = (variant?.price || 0) * (Number(line.qty) || 0);
 
   const onGroupChange = (groupId) => {
@@ -62,7 +62,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-            {item.variants.map((v) => (
+            {(item.variants || []).map((v) => (
               <button key={v.id} onClick={() => onChange({ ...line, variantId: v.id })} style={{ ...pill, ...(line.variantId === v.id ? pillActive : {}) }}>
                 {v.label} — {money(v.price)}
               </button>
@@ -71,7 +71,7 @@ function OrderLine({ line, menu, onChange, onRemove, removable }) {
         </>
       )}
       {!hasVariants && item && (
-        <div style={{ marginTop: 10, fontSize: 13, color: C.muted }}>Price: <span style={{ color: C.moss, fontWeight: 600 }}>{money(item.variants[0]?.price)}</span></div>
+        <div style={{ marginTop: 10, fontSize: 13, color: C.muted }}>Price: <span style={{ color: C.moss, fontWeight: 600 }}>{money(item.variants?.[0]?.price)}</span></div>
       )}
 
       <label style={{ ...fieldLabel, marginTop: 12 }}>Quantity</label>
@@ -104,9 +104,9 @@ function FullMenuTab({ menu }) {
             <span style={{ fontSize: 22 }}>{CATEGORY_EMOJI[g.name] || "⭐"}</span>
             <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 17, fontWeight: 700 }}>{g.name}</div>
           </div>
-          {g.items.map((it) => (
+          {(g.items || []).map((it) => (
             <div key={it.id} style={{ marginBottom: 10 }}>
-              {it.variants.map((v) => (
+              {(it.variants || []).map((v) => (
                 <div key={v.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "6px 10px", background: C.mossTint, borderRadius: 8, marginBottom: 4 }}>
                   <span>{it.name}{v.label ? ` (${v.label})` : ""}</span><span style={{ fontWeight: 700 }}>{money(v.price)}</span>
                 </div>

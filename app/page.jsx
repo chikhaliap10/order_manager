@@ -466,8 +466,8 @@ function SummaryStrip({ totals }) {
 function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
   const group = menu.find((g) => g.id === line.groupId);
   const item = group?.items.find((i) => i.id === line.itemId);
-  const hasVariants = item && item.variants.length > 1;
-  const variant = item?.variants.find((v) => v.id === line.variantId);
+  const hasVariants = item && (item.variants?.length || 0) > 1;
+  const variant = item?.variants?.find((v) => v.id === line.variantId);
   const price = line.price !== undefined && line.price !== "" ? Number(line.price) : (variant?.price || 0);
   const total = price * (Number(line.qty) || 0);
   const isCustomPrice = variant && Number(line.price) !== variant.price;
@@ -513,7 +513,7 @@ function OrderLineRow({ line, menu, onChange, onRemove, removable }) {
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Style</label>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
-            {item.variants.map((v) => (
+            {(item.variants || []).map((v) => (
               <button key={v.id} onClick={() => onVariantChange(v.id)} className="om-btn"
                 style={{ ...qtyPreset, ...(line.variantId === v.id ? qtyPresetActive : {}) }}>{v.label} — {money(v.price)}</button>
             ))}
@@ -614,6 +614,7 @@ function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeho
 
 function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
+  const [phone, setPhone] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
   const [forPartner, setForPartner] = useState(false);
@@ -655,6 +656,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
 
   const submit = async () => {
     if (!effectiveCustomer.trim()) { setError(forPartner ? "Choose a partner." : "Customer name is required."); return; }
+    if (!forPartner && !isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
@@ -680,7 +682,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
             collectedBy: settlement === "deduct" ? partnerId : "", ts,
           }
         : {
-            id: uid(), customer: customer.trim(), items, tip: tipAmount,
+            id: uid(), customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount,
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -689,7 +691,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     if (!forPartner && creditToApply > 0) {
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
+    setCustomer(""); setPhone(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
   };
 
   return (
@@ -749,6 +751,11 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
                     </button>
                   </div>
                 )}
+                <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+                <input type="tel" className="om-input" style={input} placeholder="e.g. (551) 359-1166" value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
+                {phone.trim() && !isValidPhone(phone) && (
+                  <div style={{ fontSize: 12, color: C.danger, marginTop: 4 }}>Enter at least 10 digits.</div>
+                )}
               </>
             )}
 
@@ -800,7 +807,7 @@ function orderToLines(order, menu) {
     for (const g of menu) {
       const item = g.items.find((i) => i.name === it.name);
       if (item) {
-        const variant = item.variants.find((v) => v.label === it.variantLabel) || item.variants[0];
+        const variant = item.variants?.find((v) => v.label === it.variantLabel) || item.variants?.[0];
         return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty, price: it.price };
       }
     }
@@ -812,6 +819,7 @@ function orderToLines(order, menu) {
 
 function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
+  const [phone, setPhone] = useState(order.phone || "");
   const [lines, setLines] = useState(orderToLines(order, menu));
   const [tip, setTip] = useState(order.tip ? String(order.tip) : "");
   const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
@@ -837,6 +845,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
+    if (!isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
@@ -852,7 +861,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onSave({ ...order, customer: customer.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
+    const res = await onSave({ ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -862,6 +871,8 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <div style={cardTitle}>Editing order</div>
       <label style={fieldLabel}>Customer name</label>
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+      <input type="tel" className="om-input" style={input} value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
       {order.paid && (
         <>
           <label style={{ ...fieldLabel, marginTop: 12 }}>Collected by</label>
@@ -1695,6 +1706,49 @@ function ItemForm({ initialName = "", initialVariants, submitLabel, onSubmit, on
           {submitting ? <Loader2 className="om-spin" size={14} /> : <Plus size={14} />} {submitting ? "Saving..." : submitLabel}
         </button>
       </div>
+    </div>
+  );
+}
+
+function GroupNameEditor({ group, onRenameGroup }) {
+  // Local state decoupled from the server so typing doesn't fire a save on
+  // every keystroke, and an in-progress empty field never gets persisted.
+  // Mirrors PartnerNameInput below, just styled to sit inline as a heading.
+  const [value, setValue] = useState(group.name);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { setValue(group.name); }, [group.name]);
+
+  const commit = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setError("Category name cannot be empty.");
+      setValue(group.name); // revert to the last saved value
+      return;
+    }
+    if (trimmed === group.name) return;
+    setError("");
+    setSaving(true);
+    const res = await onRenameGroup(trimmed);
+    setSaving(false);
+    if (res && !res.ok) { setError(res.error); setValue(group.name); }
+  };
+
+  return (
+    <div style={{ flex: 1, marginRight: 10 }}>
+      <div style={{ position: "relative" }}>
+        <input
+          className="om-input"
+          style={{ ...cardTitle, marginBottom: 0, width: "100%", border: "none", background: "transparent", padding: "4px 28px 4px 0" }}
+          value={value}
+          onChange={(e) => { setValue(e.target.value); setError(""); }}
+          onBlur={commit}
+          onKeyDown={(e) => e.key === "Enter" && e.target.blur()}
+        />
+        {saving && <Loader2 className="om-spin" size={13} style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", color: C.muted }} />}
+      </div>
+      <ErrorText>{error}</ErrorText>
     </div>
   );
 }

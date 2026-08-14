@@ -4,8 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "start": "next start"
+    "verify": "node scripts/verify.mjs",
+    "build": "node scripts/verify.mjs && next build",
+    "start": "next start",
+    "lint": "next lint"
   },
   "dependencies": {
     "next": "14.2.35",
@@ -15,5 +17,9 @@
     "@supabase/supabase-js": "2.110.8",
     "qrcode": "1.5.4",
     "googleapis": "140.0.1"
+  },
+  "devDependencies": {
+    "eslint": "8.57.1",
+    "eslint-config-next": "14.2.35"
   }
 }

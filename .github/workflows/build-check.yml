@@ -1,0 +1,22 @@
+name: Build check
+
+# Runs a real `npm install` + `npm run build` (which now runs the
+# dependency-free verifier in scripts/verify.mjs, then Next.js's own build +
+# ESLint) on every push and pull request. If this fails, the code is broken
+# and should NOT be deployed -- check the "Actions" tab on GitHub for the
+# exact error before merging or deploying to Vercel.
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+      - run: npm ci
+      - run: npm run build
