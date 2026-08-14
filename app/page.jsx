@@ -623,7 +623,6 @@ function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeho
 
 function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
-  const [phone, setPhone] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
   const [forPartner, setForPartner] = useState(false);
@@ -665,7 +664,6 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
 
   const submit = async () => {
     if (!effectiveCustomer.trim()) { setError(forPartner ? "Choose a partner." : "Customer name is required."); return; }
-    if (!forPartner && !isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
@@ -691,7 +689,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
             collectedBy: settlement === "deduct" ? partnerId : "", ts,
           }
         : {
-            id: uid(), customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount,
+            id: uid(), customer: customer.trim(), phone: "", items, tip: tipAmount,
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -759,11 +757,6 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
                       {applyCredit ? "Applying credit ✓" : "Apply credit"}
                     </button>
                   </div>
-                )}
-                <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
-                <input type="tel" className="om-input" style={input} placeholder="e.g. (551) 359-1166" value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
-                {phone.trim() && !isValidPhone(phone) && (
-                  <div style={{ fontSize: 12, color: C.danger, marginTop: 4 }}>Enter at least 10 digits.</div>
                 )}
               </>
             )}
@@ -854,7 +847,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
-    if (!isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits)."); return; }
+    if (phone.trim() && !isValidPhone(phone)) { setError("Enter a valid phone number (at least 10 digits), or leave it blank."); return; }
     const items = lines
       .filter((l) => {
         const it = getItemFor(l);
@@ -880,7 +873,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <div style={cardTitle}>Editing order</div>
       <label style={fieldLabel}>Customer name</label>
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
-      <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number</label>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number (optional)</label>
       <input type="tel" className="om-input" style={input} value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
       {order.paid && (
         <>
