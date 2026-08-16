@@ -47,7 +47,41 @@ export async function POST(req) {
           // "" means the shared account, a partner id means that partner
           // personally took it. Cleared automatically when marked unpaid,
           // since nobody holds money for an order that hasn't been paid.
-          return { ...o, paid: newPaid, collectedBy: newPaid ? (payload.collectedBy || "") : "" };
+          let payments = Array.isArray(o.payments) ? o.payments : [];
+          if (newPaid) {
+            // If partial payments were already recorded against this order,
+            // only log a top-up for whatever's left -- so the payments
+            // ledger always sums to the order total once it's marked paid,
+            // without double-counting money already logged.
+            const alreadyPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+            const shortfall = Number(o.total || 0) - alreadyPaid;
+            if (shortfall > 0.001) {
+              payments = [...payments, { id: uid(), method: o.paymentMethod || "Cash", amount: shortfall, ts: Date.now() }];
+            }
+          }
+          // Marking back to unpaid intentionally leaves the payments ledger
+          // alone -- it's an audit trail of money actually received, not
+          // something that should be erased by flipping a status flag.
+          return { ...o, paid: newPaid, payments, collectedBy: newPaid ? (payload.collectedBy || "") : "" };
+        });
+      } else if (action === "add-payment") {
+        if (!Array.isArray(payload.payments) || payload.payments.length === 0) return badRequest("At least one payment is required.");
+        if (payload.payments.some((p) => !(Number(p.amount) > 0))) return badRequest("Each payment amount must be greater than 0.");
+        if (payload.payments.some((p) => !p.method)) return badRequest("Each payment needs a method.");
+        const order = orders.find((o) => o.id === payload.id);
+        if (!order) return badRequest("Order not found.");
+        orders = orders.map((o) => {
+          if (o.id !== payload.id) return o;
+          const existing = Array.isArray(o.payments) ? o.payments : [];
+          const added = payload.payments.map((p) => ({ id: uid(), method: p.method, amount: Number(p.amount), ts: Date.now() }));
+          const payments = [...existing, ...added];
+          const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
+          // Once the payments logged cover the full order total, the order
+          // flips to paid automatically -- staff shouldn't have to also
+          // remember a separate "mark paid" click right after logging the
+          // payment that closes the gap.
+          const paid = o.paid || totalPaid >= Number(o.total || 0) - 0.001;
+          return { ...o, payments, paid, collectedBy: paid && !o.paid ? (o.collectedBy || "") : o.collectedBy };
         });
       } else if (action === "delete") {
         orders = orders.filter((o) => o.id !== payload.id);

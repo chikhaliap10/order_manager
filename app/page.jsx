@@ -207,8 +207,12 @@ export default function HomePage() {
   const visibleOrders = useMemo(() => orders.filter((o) => !(o.source === "online" && !o.reviewed)), [orders]);
 
   const totals = useMemo(() => {
-    const income = visibleOrders.filter((o) => o.paid).reduce((s, o) => s + o.total, 0);
-    const pending = visibleOrders.filter((o) => !o.paid).reduce((s, o) => s + o.total, 0);
+    // income/pending are based on money actually logged (paymentsTotal),
+    // not just the paid/unpaid flag -- so a $20 partial payment on an
+    // order that's still technically "Unpaid" counts as real income right
+    // away, and only the true remaining balance counts as pending.
+    const income = visibleOrders.reduce((s, o) => s + paymentsTotal(o), 0);
+    const pending = visibleOrders.reduce((s, o) => s + Math.max(0, (Number(o.total) || 0) - paymentsTotal(o)), 0);
     const expenseTotal = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
     const netProfit = income - expenseTotal;
     const share = partners.length ? netProfit / partners.length : 0;
@@ -341,6 +345,7 @@ export default function HomePage() {
         {tab === "history" && (
           <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
+            onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })}
             onAddCredit={(entry) => act("credits", "create", entry)}
@@ -1077,6 +1082,86 @@ function AmountReceivedPicker({ order, onConfirm, onCancel }) {
 const PAYMENT_METHODS = ["Cash", "Zelle", "Debit Card", "Credit Card"];
 const INTERNAL_METHOD = "Internal (deducted, no cash)";
 
+// Sum of an order's actual logged payments. Older orders saved before this
+// feature existed have no `payments` array at all -- if they're marked
+// paid, treat that as one legacy payment of the full total (in whatever
+// single method was on file) so reporting doesn't silently drop them;
+// same defensive-normalization idea as normalizeMenu() in lib/defaults.js.
+function effectivePayments(order) {
+  if (Array.isArray(order.payments) && order.payments.length > 0) return order.payments;
+  if (order.paid) return [{ id: "legacy", method: order.paymentMethod || "Cash", amount: Number(order.total) || 0, ts: order.ts }];
+  return [];
+}
+function paymentsTotal(order) {
+  return effectivePayments(order).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+}
+
+function PaymentRecorder({ order, onConfirm, onCancel }) {
+  const alreadyPaid = paymentsTotal(order);
+  const remaining = Math.max(0, order.total - alreadyPaid);
+  const [rows, setRows] = useState([{ method: "Cash", amount: remaining > 0 ? String(remaining) : "" }]);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false);
+
+  const rowsTotal = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  const newRemaining = Math.max(0, remaining - rowsTotal);
+
+  const updateRow = (i, patch) => setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const addRow = () => setRows([...rows, { method: "Zelle", amount: "" }]);
+  const removeRow = (i) => setRows(rows.filter((_, idx) => idx !== i));
+
+  const confirm = async () => {
+    if (submittedRef.current) return;
+    const cleaned = rows.filter((r) => Number(r.amount) > 0);
+    if (cleaned.length === 0) { setError("Enter at least one payment amount."); return; }
+    submittedRef.current = true;
+    setError("");
+    setSubmitting(true);
+    const res = await onConfirm(cleaned.map((r) => ({ method: r.method, amount: Number(r.amount) })));
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
+  };
+
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.ember}` }}>
+      <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>{order.customer} — bill is {money(order.total)}</div>
+      {alreadyPaid > 0 && (
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Already logged: {money(alreadyPaid)} — {money(remaining)} remaining</div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {rows.map((r, i) => (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 130px" }} value={r.method} onChange={(e) => updateRow(i, { method: e.target.value })}>
+              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
+              placeholder="Amount" value={r.amount} onChange={(e) => updateRow(i, { amount: e.target.value })} />
+            {rows.length > 1 && (
+              <button onClick={() => removeRow(i)} style={{ ...iconBtn, width: 32, height: 32 }} className="om-btn" aria-label="Remove payment row"><X size={13} /></button>
+            )}
+          </div>
+        ))}
+      </div>
+      <button onClick={addRow} className="om-btn" style={{ ...quickTagBtn, marginTop: 8, alignSelf: "flex-start" }}>+ Split across another method</button>
+      <div style={{ fontSize: 13, marginTop: 10, color: newRemaining > 0.001 ? C.ember : C.moss }}>
+        {newRemaining > 0.001
+          ? `${money(rowsTotal)} entered — ${money(newRemaining)} will still be owed after this`
+          : rowsTotal > remaining + 0.001
+            ? `${money(rowsTotal)} entered — this covers the full ${money(remaining)} remaining (order will be marked Paid)`
+            : `${money(rowsTotal)} entered — covers the full remaining balance (order will be marked Paid)`}
+      </div>
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Log payment"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CreditEditForm({ entry, onSave, onCancel }) {
   const [amount, setAmount] = useState(String(entry.amount));
   const [note, setNote] = useState(entry.note || "");
@@ -1175,9 +1260,14 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
 
 function computePaymentTypeTotals(orders) {
   const map = {};
-  orders.filter((o) => o.paid).forEach((o) => {
-    const method = o.paymentMethod || "Cash";
-    map[method] = (map[method] || 0) + o.total;
+  // Every logged payment counts toward the drawer, whether or not the
+  // order it belongs to is fully paid yet -- a $20 cash payment on a
+  // still-"Unpaid" order is real cash you're holding right now.
+  orders.forEach((o) => {
+    effectivePayments(o).forEach((p) => {
+      const method = p.method || "Cash";
+      map[method] = (map[method] || 0) + (Number(p.amount) || 0);
+    });
   });
   const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
   const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
@@ -1190,7 +1280,7 @@ function PaymentTypeTotals({ orders }) {
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Total by payment method</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Paid orders only — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment actually logged so far, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {rows.map((r) => (
           <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${r.internal ? C.warning : C.border}`, borderRadius: 10, padding: "10px 12px" }}>
@@ -1204,10 +1294,11 @@ function PaymentTypeTotals({ orders }) {
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpdate, onDelete, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddPayment, onUpdate, onDelete, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
+  const [recordingPaymentId, setRecordingPaymentId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
   const [returningId, setReturningId] = useState(null);
   const [search, setSearch] = useState("");
@@ -1303,6 +1394,10 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
               <AmountReceivedPicker key={o.id} order={o}
                 onConfirm={(amt) => recordAmountReceived(o, amt)}
                 onCancel={() => setRecordingAmountId(null)} />
+            ) : recordingPaymentId === o.id ? (
+              <PaymentRecorder key={o.id} order={o}
+                onConfirm={async (payments) => { const res = await onAddPayment(o.id, payments); if (res.ok) setRecordingPaymentId(null); return res; }}
+                onCancel={() => setRecordingPaymentId(null)} />
             ) : (
               <div key={o.id} style={{ ...rowCard, borderLeft: `3px solid ${o.paid ? C.success : C.warning}` }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -1341,6 +1436,18 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onUpda
                         {o.amountReceived !== undefined && o.amountReceived > o.total
                           ? `Received ${money(o.amountReceived)} (${money(o.amountReceived - o.total)} owed to them)`
                           : "Paid more than the bill?"}
+                      </button>
+                    </div>
+                  )}
+                  {!o.paid && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+                      {paymentsTotal(o) > 0 && (
+                        <span style={{ fontSize: 12, color: C.ember, fontWeight: 600 }}>
+                          {money(paymentsTotal(o))} of {money(o.total)} paid — {money(Math.max(0, o.total - paymentsTotal(o)))} remaining
+                        </span>
+                      )}
+                      <button onClick={() => setRecordingPaymentId(o.id)} className="om-btn" style={quickTagBtn}>
+                        {paymentsTotal(o) > 0 ? "Log another payment" : "Log a payment (partial or split)"}
                       </button>
                     </div>
                   )}
