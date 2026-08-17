@@ -849,6 +849,8 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [orderDate, setOrderDate] = useState(tsToDateString(order.ts || Date.now()));
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [extraMethod, setExtraMethod] = useState("Cash");
+  const [extraAmountOverride, setExtraAmountOverride] = useState(null); // null = still tracking the live diff automatically
   const getItemFor = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
   const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
   const linePrice = (l) => {
@@ -859,12 +861,37 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = Number(tip) || 0;
   const total = subtotal + tipAmount;
+  // How much is actually logged as paid on this order right now, vs. what
+  // the bill comes to after this edit. If they differ and the order was
+  // already marked Paid, the payments ledger would otherwise silently go
+  // stale -- the order would keep showing "Paid" while the Cash Drawer
+  // total quietly stops matching the real total. See the diff-handling
+  // block in save() below.
+  const alreadyLogged = paymentsTotal(order);
+  const diff = total - alreadyLogged;
+  const extraAmount = extraAmountOverride !== null ? extraAmountOverride : (diff > 0.001 ? diff.toFixed(2) : "");
   const updateLine = (updated) => setLines(lines.map((l) => (l.id === updated.id ? updated : l)));
   const removeLine = (id) => setLines(lines.filter((l) => l.id !== id));
   const addLine = () => {
     const g = menu[0]; const it = firstItem(g);
     const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" }]);
+  };
+  // Trims the most-recently-logged payments first when a bill shrinks
+  // below what's already been logged as paid -- e.g. an item gets removed
+  // after the order was marked paid. Keeps the ledger's total in sync with
+  // the new, lower bill without needing a separate refund flow for this
+  // edit-time correction.
+  const trimPayments = (payments, amountToRemove) => {
+    let remaining = amountToRemove;
+    const result = [];
+    for (let i = payments.length - 1; i >= 0; i--) {
+      const p = payments[i];
+      if (remaining <= 0.001) { result.unshift(p); continue; }
+      if (p.amount <= remaining + 0.001) { remaining -= p.amount; }
+      else { result.unshift({ ...p, amount: p.amount - remaining }); remaining = 0; }
+    }
+    return result;
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
@@ -884,7 +911,32 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const res = await onSave({ ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: itemsTotal + tipAmount, collectedBy: order.paid ? collectedBy : "", ts: dateStringToTs(orderDate) });
+    const newTotal = itemsTotal + tipAmount;
+
+    let payments = effectivePayments(order);
+    let paid = order.paid;
+    if (order.paid) {
+      const gap = newTotal - alreadyLogged;
+      if (gap > 0.001) {
+        // Bill went up -- log whatever amount was actually collected for
+        // the difference (0 if the customer hasn't paid it yet).
+        const collected = Number(extraAmount) || 0;
+        if (collected > 0) {
+          payments = [...payments, { id: uid(), method: extraMethod, amount: collected, collectedBy: "", ts: Date.now() }];
+        }
+        const newSum = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+        paid = newSum >= newTotal - 0.001; // stays Paid only if the gap was fully covered
+      } else if (gap < -0.001) {
+        // Bill went down -- trim the ledger to match, most-recent first.
+        payments = trimPayments(payments, -gap);
+        paid = true; // a lower bill that was already fully paid is still fully paid
+      }
+    }
+
+    const res = await onSave({
+      ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: newTotal,
+      payments, paid, collectedBy: paid ? collectedBy : "", ts: dateStringToTs(orderDate),
+    });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -916,6 +968,30 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <label style={{ ...fieldLabel, marginTop: 16 }}>Order date</label>
       <input type="date" className="om-input" style={{ ...input, width: 170 }} value={orderDate} max={todayDateString()} onChange={(e) => setOrderDate(e.target.value)} />
       <ErrorText>{error}</ErrorText>
+      {order.paid && diff > 0.001 && (
+        <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.warningTint, border: `1px solid ${C.warning}44` }}>
+          <div style={{ fontSize: 13, color: C.warning, fontWeight: 600, marginBottom: 8 }}>
+            This adds {money(diff)} to a bill already marked Paid — how was the extra paid?
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 130px" }} value={extraMethod} onChange={(e) => setExtraMethod(e.target.value)}>
+              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
+              placeholder="0.00 if not paid yet" value={extraAmount} onChange={(e) => setExtraAmountOverride(e.target.value)} />
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
+            Leave it at {money(0)} if the customer hasn't paid the difference yet — the order will show as Partial instead of Paid.
+          </div>
+        </div>
+      )}
+      {order.paid && diff < -0.001 && (
+        <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.warningTint, border: `1px solid ${C.warning}44` }}>
+          <div style={{ fontSize: 13, color: C.warning, fontWeight: 600 }}>
+            This removes {money(-diff)} from a bill already marked Paid — that amount will be taken off the most recently logged payment(s) so the Cash Drawer total stays accurate.
+          </div>
+        </div>
+      )}
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
         {tipAmount > 0 && (
           <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)} + tip {money(tipAmount)}</div>
