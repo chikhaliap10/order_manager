@@ -73,7 +73,7 @@ export async function POST(req) {
         orders = orders.map((o) => {
           if (o.id !== payload.id) return o;
           const existing = Array.isArray(o.payments) ? o.payments : [];
-          const added = payload.payments.map((p) => ({ id: uid(), method: p.method, amount: Number(p.amount), ts: Date.now() }));
+          const added = payload.payments.map((p) => ({ id: uid(), method: p.method, amount: Number(p.amount), collectedBy: p.method === "Cash" ? (p.collectedBy || "") : "", ts: Date.now() }));
           const payments = [...existing, ...added];
           const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
           // Once the payments logged cover the full order total, the order

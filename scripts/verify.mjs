@@ -86,10 +86,61 @@ function checkUnguardedVariantAccess(file, src) {
 }
 
 // ---- Check 3: balanced braces/parens (catches truncated edits) ----
+// Strips comments and "..."/`...` string content before counting, since
+// raw character counts get thrown off by ordinary things like a stray ')'
+// in a comment ("do this (once)") or code inside a template literal.
+// Deliberately does NOT treat ' as a string delimiter -- JSX text content
+// in this codebase uses plain apostrophes ("they're") that would otherwise
+// be misread as opening a string and swallow real code up to the next
+// apostrophe, producing a false imbalance report.
+function stripCommentsAndStrings(src) {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const prevEscaped = src[i - 1] === "\\";
+    // A `/` immediately preceded by `\` is an escaped slash inside a regex
+    // literal (e.g. /^https?:\/\//), not the start of a comment -- without
+    // this check, that trailing `\//` gets misread as `//` and silently
+    // eats the rest of the line.
+    if (c === "/" && src[i + 1] === "/" && !prevEscaped) {
+      const j = src.indexOf("\n", i);
+      const end = j === -1 ? n : j;
+      out += "\n".repeat((src.slice(i, end).match(/\n/g) || []).length);
+      i = end;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*" && !prevEscaped) {
+      const j = src.indexOf("*/", i + 2);
+      const end = j === -1 ? n : j + 2;
+      out += "\n".repeat((src.slice(i, end).match(/\n/g) || []).length);
+      i = end;
+      continue;
+    }
+    if (c === '"' || c === "`") {
+      const quote = c;
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "\\") { j += 2; continue; }
+        if (src[j] === quote) { j += 1; break; }
+        j += 1;
+      }
+      out += "\n".repeat((src.slice(i, j).match(/\n/g) || []).length);
+      i = j;
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 function checkBalance(file, src) {
   const rel = path.relative(ROOT, file);
-  const braces = (src.match(/\{/g) || []).length - (src.match(/\}/g) || []).length;
-  const parens = (src.match(/\(/g) || []).length - (src.match(/\)/g) || []).length;
+  const clean = stripCommentsAndStrings(src);
+  const braces = (clean.match(/\{/g) || []).length - (clean.match(/\}/g) || []).length;
+  const parens = (clean.match(/\(/g) || []).length - (clean.match(/\)/g) || []).length;
   if (braces !== 0 || parens !== 0) {
     problems++;
     console.log(`\n✗ ${rel}`);
