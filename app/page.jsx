@@ -1397,6 +1397,84 @@ function PaymentTypeTotals({ orders }) {
           </div>
         ))}
       </div>
+      <ErrorText>{error}</ErrorText>
+    </div>
+  );
+}
+// total -- exactly the gap that opens up when an already-paid order gets
+// edited (item added, price fixed) without a matching payment ever being
+// logged for the difference. See OrderEditForm's diff-handling for the
+// fix going forward; this is the cleanup tool for orders that went stale
+// before that fix existed.
+function findPaymentGaps(orders) {
+  return orders
+    .filter((o) => o.paid)
+    .map((o) => ({ order: o, gap: (Number(o.total) || 0) - paymentsTotal(o) }))
+    .filter((x) => x.gap > 0.01);
+}
+
+function PaymentGapReconciler({ orders, onAddPayment }) {
+  const gaps = findPaymentGaps(orders);
+  const [fixingId, setFixingId] = useState(null);
+  const [fixingAll, setFixingAll] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [error, setError] = useState("");
+
+  if (gaps.length === 0 || dismissed) return null;
+
+  const fixOne = async (o, gap) => {
+    setFixingId(o.id);
+    setError("");
+    // Logs the missing amount using whatever method the order was already
+    // marked as paid via -- it's a correction to bring the existing record
+    // in line with reality, not a new payment decision, so it reuses the
+    // method already on file rather than asking again.
+    const res = await onAddPayment(o.id, [{ method: o.paymentMethod || "Cash", amount: gap }]);
+    if (res && !res.ok) setError(`${o.customer}: ${res.error}`);
+    setFixingId(null);
+  };
+
+  const fixAll = async () => {
+    setFixingAll(true);
+    setError("");
+    for (const { order: o, gap } of gaps) {
+      const res = await onAddPayment(o.id, [{ method: o.paymentMethod || "Cash", amount: gap }]);
+      if (res && !res.ok) { setError(`${o.customer}: ${res.error}`); break; }
+    }
+    setFixingAll(false);
+  };
+
+  const totalGap = gaps.reduce((s, g) => s + g.gap, 0);
+
+  return (
+    <div style={{ ...card, marginBottom: 18, borderColor: C.danger }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ ...cardTitle, color: C.danger, marginBottom: 4 }}>{gaps.length} order{gaps.length === 1 ? "" : "s"} under-logged by {money(totalGap)} total</div>
+          <div style={{ fontSize: 12, color: C.muted }}>
+            These are marked Paid but their logged payments don't add up to the full total — almost always from an item added or a price fixed after the order was already marked paid. Fixing one logs the missing amount using the payment method already on file for that order.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <button onClick={() => setDismissed(true)} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Hide for now</button>
+          <button onClick={fixAll} disabled={fixingAll} style={{ ...primaryBtn, width: "auto", marginTop: 0, background: C.danger, opacity: fixingAll ? 0.7 : 1 }} className="om-btn">
+            {fixingAll ? <Loader2 className="om-spin" size={14} /> : null} Fix all {gaps.length}
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 14 }}>
+        {gaps.map(({ order: o, gap }) => (
+          <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13 }}>
+              <span style={{ fontWeight: 600 }}>{o.customer}</span>
+              <span style={{ color: C.muted }}> — logged {money(paymentsTotal(o))} of {money(o.total)} ({o.paymentMethod || "Cash"})</span>
+            </div>
+            <button onClick={() => fixOne(o, gap)} disabled={fixingId === o.id || fixingAll} className="om-btn" style={quickTagBtn}>
+              {fixingId === o.id ? <Loader2 className="om-spin" size={11} /> : null} Log missing {money(gap)}
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1461,6 +1539,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
   return (
     <div>
       <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} />
+      <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
       <PaymentTypeTotals orders={orders} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} />
