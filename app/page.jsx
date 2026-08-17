@@ -720,7 +720,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     if (!forPartner && creditToApply > 0) {
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
     }
-    setCustomer(""); setPhone(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
   };
 
   return (
