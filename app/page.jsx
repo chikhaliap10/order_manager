@@ -221,27 +221,26 @@ export default function HomePage() {
     const paidExpensesByPartner = {};
     partners.forEach((p) => {
       withdrawnByPartner[p.id] = withdrawals.filter((w) => w.partnerId === p.id).reduce((s, w) => s + Number(w.amount || 0), 0);
-      // Cash a partner personally collected is money they're already
-      // holding -- it counts against their balance exactly like a
-      // withdrawal would, even though no formal withdrawal was made.
+      // A Zelle payment a partner personally received is money they're
+      // already holding -- it counts against their balance exactly like a
+      // withdrawal would, even though no formal withdrawal was made. Cash
+      // always lands in the shared drawer, so it's never attributed here.
       // Two sources, kept separate so a split payment (e.g. $100 cash +
-      // $35 Zelle) only attributes the actual $100 cash portion to
-      // whoever's holding it, not the full order total:
+      // $35 Zelle) only attributes the actual $35 Zelle portion to
+      // whoever received it, not the full order total:
       //   1) Partner "deduct" settlement orders -- unchanged, still
       //      order-level (the whole internal order is the deduction).
-      //   2) Individual Cash payment records across regular customer
-      //      orders, whichever partner (if any) is marked as holding
-      //      that specific portion -- Zelle/Debit/Credit never count
-      //      here since that money lands straight in a bank account,
-      //      never in anyone's pocket.
+      //   2) Individual Zelle payment records across regular customer
+      //      orders, whichever partner (if any) received that specific
+      //      portion personally -- Cash/Debit/Credit never count here.
       const internalDeduction = visibleOrders
         .filter((o) => o.paid && o.collectedBy === p.id && o.paymentMethod === INTERNAL_METHOD)
         .reduce((s, o) => s + o.total, 0);
-      const cashHeldPersonally = visibleOrders.reduce(
-        (s, o) => s + effectivePayments(o).filter((pay) => pay.method === "Cash" && pay.collectedBy === p.id).reduce((s2, pay) => s2 + (Number(pay.amount) || 0), 0),
+      const zelleReceivedPersonally = visibleOrders.reduce(
+        (s, o) => s + effectivePayments(o).filter((pay) => pay.method === "Zelle" && pay.collectedBy === p.id).reduce((s2, pay) => s2 + (Number(pay.amount) || 0), 0),
         0
       );
-      collectedByPartner[p.id] = internalDeduction + cashHeldPersonally;
+      collectedByPartner[p.id] = internalDeduction + zelleReceivedPersonally;
       // Expenses a partner paid out of their own pocket are the opposite --
       // they fronted business money personally, so it's credited back.
       paidExpensesByPartner[p.id] = expenses.filter((e) => e.paidBy === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
@@ -1139,7 +1138,11 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
     // land straight in a bank account, so collectedBy is meaningless (and
     // dropped) for those, even if a row briefly had one set before the
     // method was switched.
-    const res = await onConfirm(cleaned.map((r) => ({ method: r.method, amount: Number(r.amount), collectedBy: r.method === "Cash" ? r.collectedBy : "" })));
+    // Cash always lands in the shared drawer -- no attribution needed.
+    // Zelle goes to whichever specific phone/email the customer sent it
+    // to, which could be a partner's personal account, so that's the one
+    // that needs a collector.
+    const res = await onConfirm(cleaned.map((r) => ({ method: r.method, amount: Number(r.amount), collectedBy: r.method === "Zelle" ? r.collectedBy : "" })));
     setSubmitting(false);
     if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
   };
@@ -1158,11 +1161,11 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
             </select>
             <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
               placeholder="Amount" value={r.amount} onChange={(e) => updateRow(i, { amount: e.target.value })} />
-            {r.method === "Cash" && (
+            {r.method === "Zelle" && (
               <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
                 value={r.collectedBy} onChange={(e) => updateRow(i, { collectedBy: e.target.value })}>
-                <option value="">Cash → shared account</option>
-                {partners.map((p) => <option key={p.id} value={p.id}>Cash → {p.name} personally</option>)}
+                <option value="">Zelle → shared account</option>
+                {partners.map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
               </select>
             )}
             {rows.length > 1 && (
@@ -1344,11 +1347,11 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
     if (order.paymentMethod === INTERNAL_METHOD) {
       await onUpdate({ ...order, collectedBy: "" });
     } else {
-      // Only touch the Cash payment records -- Zelle/Debit/Credit never
+      // Only touch the Zelle payment records -- Cash/Debit/Credit never
       // had a collector to begin with. Also written back as `payments` so
       // an old order still on the legacy single collectedBy shape gets
       // upgraded to the new per-payment shape at the same time.
-      const payments = effectivePayments(order).map((p) => (p.method === "Cash" ? { ...p, collectedBy: "" } : p));
+      const payments = effectivePayments(order).map((p) => (p.method === "Zelle" ? { ...p, collectedBy: "" } : p));
       await onUpdate({ ...order, payments, collectedBy: "" });
     }
     setReturningId(null);
@@ -1435,13 +1438,13 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
                     // value from this picker.
                     await onUpdate({ ...o, collectedBy });
                   } else {
-                    // Blanket-assigns this collector to every Cash payment
-                    // on the order (the common case is a single cash
-                    // payment, so this is exactly right there; for a
-                    // genuinely split cash-among-multiple-collectors case,
+                    // Blanket-assigns this collector to every Zelle
+                    // payment on the order (the common case is a single
+                    // Zelle payment, so this is exactly right there; for a
+                    // genuinely split Zelle-among-multiple-collectors case,
                     // use "Log a payment" per portion instead, which lets
-                    // each Cash row pick its own collector as it's logged).
-                    const payments = effectivePayments(o).map((p) => (p.method === "Cash" ? { ...p, collectedBy } : p));
+                    // each Zelle row pick its own collector as it's logged).
+                    const payments = effectivePayments(o).map((p) => (p.method === "Zelle" ? { ...p, collectedBy } : p));
                     await onUpdate({ ...o, payments, collectedBy });
                   }
                   setPickingCollectorId(null);
@@ -1470,11 +1473,12 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
                   </div>
                   {o.paid && (() => {
                     const payments = effectivePayments(o);
-                    // Cash can be personally held by a partner; so can an
-                    // internal partner-meal deduction (that's the whole
-                    // point of it) -- Zelle/Debit/Credit never can, since
-                    // that money lands straight in a bank account.
-                    const attributable = payments.filter((p) => p.method === "Cash" || p.method === INTERNAL_METHOD);
+                    // Zelle can be personally received by a partner; so
+                    // can an internal partner-meal deduction (that's the
+                    // whole point of it) -- Cash always lands in the
+                    // shared drawer, and Debit/Credit go straight to the
+                    // shared merchant account, so neither is attributable.
+                    const attributable = payments.filter((p) => p.method === "Zelle" || p.method === INTERNAL_METHOD);
                     const collected = attributable.filter((p) => p.collectedBy);
                     return (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
@@ -1483,7 +1487,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
                           value={o.paymentMethod || "Cash"}
                           onChange={(e) => {
                             const method = e.target.value;
-                            const updatedPayments = payments.length === 1 ? [{ ...payments[0], method, collectedBy: method === "Cash" ? payments[0].collectedBy : "" }] : payments;
+                            const updatedPayments = payments.length === 1 ? [{ ...payments[0], method, collectedBy: method === "Zelle" ? payments[0].collectedBy : "" }] : payments;
                             onUpdate({ ...o, paymentMethod: method, payments: updatedPayments });
                           }}>
                           {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
@@ -1499,7 +1503,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
                       {collected.length > 0 ? (
                         <>
                           <span style={{ fontSize: 12, color: C.ember }}>
-                            {o.paymentMethod === INTERNAL_METHOD ? "Collected by " : "Cash held by "}
+                            {o.paymentMethod === INTERNAL_METHOD ? "Collected by " : "Zelle received by "}
                             {[...new Set(collected.map((p) => partnerName(p.collectedBy) || "Unknown"))].join(", ")}
                           </span>
                           {o.paymentMethod !== INTERNAL_METHOD && (
@@ -1511,7 +1515,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
                         </>
                       ) : attributable.length > 0 ? (
                         <button onClick={() => setPickingCollectorId(o.id)} className="om-btn" style={quickTagBtn}>
-                          A partner collected this cash instead of shared?
+                          Was this Zelle sent to a partner personally?
                         </button>
                       ) : null}
                       <button onClick={() => setRecordingAmountId(o.id)} className="om-btn" style={quickTagBtn}>
