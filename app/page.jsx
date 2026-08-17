@@ -1397,10 +1397,11 @@ function PaymentTypeTotals({ orders }) {
           </div>
         ))}
       </div>
-      <ErrorText>{error}</ErrorText>
     </div>
   );
 }
+
+// Finds paid orders where the payments ledger falls short of the order
 // total -- exactly the gap that opens up when an already-paid order gets
 // edited (item added, price fixed) without a matching payment ever being
 // logged for the difference. See OrderEditForm's diff-handling for the
@@ -1475,6 +1476,7 @@ function PaymentGapReconciler({ orders, onAddPayment }) {
           </div>
         ))}
       </div>
+      <ErrorText>{error}</ErrorText>
     </div>
   );
 }
