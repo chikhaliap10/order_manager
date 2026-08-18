@@ -1087,12 +1087,34 @@ function computeItemBreakdown(orders, menu) {
     });
   });
 
-  // Item name (lowercased) -> category name, from whatever the live menu
-  // actually has right now -- not the hardcoded code defaults, since Setup
-  // customization means those can differ completely.
-  const nameToCategory = {};
+  // Two lookups from the live menu:
+  //  - pairToCategory: exact (item name, variant label) -> category. This
+  //    is the precise match -- it's what correctly tells apart two
+  //    DIFFERENT items that happen to share a name across categories
+  //    (e.g. this menu has a "Regular" item under Surti Aloopuri with
+  //    Red Sev/Papdi/Cheese as variants, AND a completely separate
+  //    "Regular" item under Gughara with no variants at all -- matching
+  //    on bare name alone would silently collide the two).
+  //  - unambiguousNameToCategory: bare item name -> category, but ONLY for
+  //    names that exist in exactly one category. An ambiguous bare name
+  //    (like "Regular" here) is deliberately left out, so a historical
+  //    order with no variant info falls to "Other" instead of guessing
+  //    between two real possibilities.
+  const pairToCategory = {};
+  const nameCategories = {};
   (menu || []).forEach((g) => {
-    (g.items || []).forEach((it) => { nameToCategory[it.name.trim().toLowerCase()] = g.name; });
+    (g.items || []).forEach((it) => {
+      const iname = it.name.trim().toLowerCase();
+      nameCategories[iname] = nameCategories[iname] || new Set();
+      nameCategories[iname].add(g.name);
+      (it.variants || []).forEach((v) => {
+        if (v.label) pairToCategory[`${iname}||${v.label.trim().toLowerCase()}`] = g.name;
+      });
+    });
+  });
+  const unambiguousNameToCategory = {};
+  Object.entries(nameCategories).forEach(([name, cats]) => {
+    if (cats.size === 1) unambiguousNameToCategory[name] = [...cats][0];
   });
   const cocoCategoryName = (menu || []).find((g) => g.name.trim().toLowerCase() === "coco")?.name || "Coco";
 
@@ -1110,11 +1132,21 @@ function computeItemBreakdown(orders, menu) {
 
     // Vote for a category across every contributing spelling (weighted by
     // qty), since a swap could put the real item name in either field.
+    // Exact (name, variant) pair match takes priority over the bare-name
+    // fallback -- it's the only thing that can tell apart two same-named
+    // items in different categories.
     const votes = {};
     Object.entries(b.variants).forEach(([label, qty]) => {
       const parts = splitLabel(label);
-      const cat = nameToCategory[parts.outer.toLowerCase()] || nameToCategory[parts.inner?.toLowerCase()]
-        || (COCO_FAMILY_ALIASES.includes(parts.outer.toLowerCase()) || COCO_FAMILY_ALIASES.includes(parts.inner?.toLowerCase()) ? cocoCategoryName : null);
+      let cat = null;
+      if (parts.inner) {
+        cat = pairToCategory[`${parts.outer.toLowerCase()}||${parts.inner.toLowerCase()}`]
+          || pairToCategory[`${parts.inner.toLowerCase()}||${parts.outer.toLowerCase()}`];
+      }
+      if (!cat) cat = unambiguousNameToCategory[parts.outer.toLowerCase()] || unambiguousNameToCategory[parts.inner?.toLowerCase()];
+      if (!cat && (COCO_FAMILY_ALIASES.includes(parts.outer.toLowerCase()) || COCO_FAMILY_ALIASES.includes(parts.inner?.toLowerCase()))) {
+        cat = cocoCategoryName;
+      }
       if (cat) votes[cat] = (votes[cat] || 0) + qty;
     });
     const category = Object.entries(votes).sort((a, z) => z[1] - a[1])[0]?.[0] || "Other";
