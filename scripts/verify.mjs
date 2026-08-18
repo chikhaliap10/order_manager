@@ -138,7 +138,18 @@ function stripCommentsAndStrings(src) {
 
 function checkBalance(file, src) {
   const rel = path.relative(ROOT, file);
-  const clean = stripCommentsAndStrings(src);
+  let clean = stripCommentsAndStrings(src);
+  // Regex character classes like [^)] contain parens that don't need
+  // escaping there, which otherwise throws off the raw count below (this
+  // bit the checker twice already). `[^` is a safe, unambiguous signal
+  // that a regex character class follows -- `^` isn't a valid unary
+  // operator in JS, so `[^` can never legitimately start an array literal;
+  // it only ever appears in a regex. Blank out any ( or ) between that
+  // `[^` and its closing `]` before counting. (Deliberately narrower than
+  // trying to detect regex-literal boundaries in general: that was tried
+  // and reverted because it mistook JSX closing/self-closing tags for
+  // regex starts and corrupted far more than it fixed.)
+  clean = clean.replace(/\[\^[^\]]*\]/g, (m) => m.replace(/[()]/g, " "));
   const braces = (clean.match(/\{/g) || []).length - (clean.match(/\}/g) || []).length;
   const parens = (clean.match(/\(/g) || []).length - (clean.match(/\)/g) || []).length;
   if (braces !== 0 || parens !== 0) {

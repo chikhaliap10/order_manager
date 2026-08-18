@@ -1037,17 +1037,123 @@ function CollectorPicker({ order, partners, onConfirm, onCancel }) {
   );
 }
 
-function computeItemBreakdown(orders) {
-  const map = {};
+// Historical orders sometimes recorded the same dish under swapped
+// item/variant text (e.g. one order as "Red Sev (Regular)", another as
+// "Regular (Red Sev)") -- same dish, just which field held the topping vs.
+// the style flipped at some point. Treating {name, variantLabel} as an
+// unordered pair (sorted, case-insensitive) means both spellings land in
+// the same bucket no matter which field held which value historically.
+function swapMergeKey(name, variantLabel) {
+  const parts = variantLabel ? [name, variantLabel] : [name];
+  return parts.map((p) => p.trim().toLowerCase()).sort().join("||");
+}
+
+// Old Coco-family orders (before the menu was cleaned up) recorded the
+// item name as a bare size like "12 OZ" or "1 Liter", with the flavor in
+// variantLabel -- e.g. name="12 OZ", variantLabel="Kaju". The current menu
+// instead has one "Coco" item with the size+flavor combined into a single
+// Style pick. Both shapes mean the same thing: a Coco drink. This list is
+// how historical orders get recognized as belonging to the Coco category
+// even though their literal item name doesn't say "Coco" -- add to it if
+// another old size-only name turns up later. Kept separate from
+// COCO_FAMILY_ALIASES (below) because a bare "Coco" row needs different
+// relabeling treatment ("Plain") than a bare size row ("12 OZ" -> the size
+// itself, once there's a flavor to pair it with).
+const COCO_SIZE_ALIASES = ["12 oz", "1 liter", "1 litre"];
+const COCO_FAMILY_ALIASES = ["coco", ...COCO_SIZE_ALIASES];
+
+// Groups sold plates by their CURRENT live menu category (Setup tab order),
+// merging swapped-field duplicates within each category first. Order line
+// items only ever store a name/variant snapshot, not which category they
+// came from -- so category is determined by matching that snapshot against
+// today's menu. An item that's since been renamed or removed, or an old
+// Coco-family name, falls back to a best-effort match; anything that
+// matches nothing lands in "Other" rather than silently vanishing.
+function computeItemBreakdown(orders, menu) {
+  // Pass 1: merge swapped-field duplicates (e.g. "Red Sev (Regular)" and
+  // "Regular (Red Sev)" are the same dish), keeping every contributing raw
+  // spelling + qty so category-matching below can check all of them, not
+  // just whichever spelling happened to be more common.
+  const merged = {};
   orders.forEach((o) => {
     (o.items || []).forEach((i) => {
-      const key = i.variantLabel ? `${i.name} (${i.variantLabel})` : i.name;
-      if (!map[key]) map[key] = { key, qty: 0, revenue: 0 };
-      map[key].qty += Number(i.qty) || 0;
-      map[key].revenue += (Number(i.price) || 0) * (Number(i.qty) || 0);
+      const mkey = swapMergeKey(i.name, i.variantLabel);
+      if (!merged[mkey]) merged[mkey] = { variants: {}, qty: 0, revenue: 0 };
+      const b = merged[mkey];
+      b.qty += Number(i.qty) || 0;
+      b.revenue += (Number(i.price) || 0) * (Number(i.qty) || 0);
+      const label = i.variantLabel ? `${i.name} (${i.variantLabel})` : i.name;
+      b.variants[label] = (b.variants[label] || 0) + (Number(i.qty) || 0);
     });
   });
-  return Object.values(map).sort((a, b) => b.revenue - a.revenue);
+
+  // Item name (lowercased) -> category name, from whatever the live menu
+  // actually has right now -- not the hardcoded code defaults, since Setup
+  // customization means those can differ completely.
+  const nameToCategory = {};
+  (menu || []).forEach((g) => {
+    (g.items || []).forEach((it) => { nameToCategory[it.name.trim().toLowerCase()] = g.name; });
+  });
+  const cocoCategoryName = (menu || []).find((g) => g.name.trim().toLowerCase() === "coco")?.name || "Coco";
+
+  const splitLabel = (label) => {
+    const m = label.match(/^(.*?)(?:\s*\((.*)\))?$/);
+    return { outer: (m?.[1] || label).trim(), inner: m?.[2]?.trim() };
+  };
+
+  const categories = {}; // categoryName -> { rows: {} }
+  const bucketOf = (name) => (categories[name] = categories[name] || { rows: {} });
+
+  Object.values(merged).forEach((b) => {
+    const [bestLabel] = Object.entries(b.variants).sort((a, z) => z[1] - a[1] || a[0].localeCompare(z[0]))[0];
+    const { outer, inner } = splitLabel(bestLabel);
+
+    // Vote for a category across every contributing spelling (weighted by
+    // qty), since a swap could put the real item name in either field.
+    const votes = {};
+    Object.entries(b.variants).forEach(([label, qty]) => {
+      const parts = splitLabel(label);
+      const cat = nameToCategory[parts.outer.toLowerCase()] || nameToCategory[parts.inner?.toLowerCase()]
+        || (COCO_FAMILY_ALIASES.includes(parts.outer.toLowerCase()) || COCO_FAMILY_ALIASES.includes(parts.inner?.toLowerCase()) ? cocoCategoryName : null);
+      if (cat) votes[cat] = (votes[cat] || 0) + qty;
+    });
+    const category = Object.entries(votes).sort((a, z) => z[1] - a[1])[0]?.[0] || "Other";
+
+    // Within the Coco category specifically, relabel old size-as-item-name
+    // rows ("12 OZ (Kaju)") to read as "Kaju (12 OZ)" for consistency with
+    // the current single-Coco-item menu shape, and a bare "Coco"/"12 OZ"
+    // row (no flavor) reads as "Plain".
+    let displayLabel = bestLabel;
+    if (category === cocoCategoryName) {
+      const outerIsSize = COCO_SIZE_ALIASES.includes(outer.toLowerCase());
+      displayLabel = outerIsSize ? (inner ? `${inner} (${outer})` : outer) : outer.toLowerCase() === "coco" ? (inner || "Plain") : bestLabel;
+    }
+
+    const rows = bucketOf(category).rows;
+    rows[displayLabel] = rows[displayLabel] || { key: displayLabel, qty: 0, revenue: 0 };
+    rows[displayLabel].qty += b.qty;
+    rows[displayLabel].revenue += b.revenue;
+  });
+
+  // Category order follows the live menu's Setup order, with "Other" last.
+  const categoryOrder = (menu || []).map((g) => g.name);
+  const allCategoryNames = Object.keys(categories).sort((a, z) => {
+    const ai = categoryOrder.indexOf(a), zi = categoryOrder.indexOf(z);
+    if (ai === -1 && zi === -1) return a.localeCompare(z);
+    if (ai === -1) return 1;
+    if (zi === -1) return -1;
+    return ai - zi;
+  });
+
+  return allCategoryNames.map((name) => {
+    const rows = Object.values(categories[name].rows).sort((a, b) => b.revenue - a.revenue);
+    return {
+      name,
+      rows,
+      qty: rows.reduce((s, r) => s + r.qty, 0),
+      revenue: rows.reduce((s, r) => s + r.revenue, 0),
+    };
+  });
 }
 
 function computeDailyBreakdown(orders) {
@@ -1096,30 +1202,43 @@ function DailyBreakdown({ orders }) {
   );
 }
 
-function SalesBreakdown({ orders }) {
-  const rows = computeItemBreakdown(orders);
-  if (rows.length === 0) return null;
-  const totalQty = rows.reduce((s, r) => s + r.qty, 0);
-  const totalRevenue = rows.reduce((s, r) => s + r.revenue, 0);
+function SalesBreakdown({ orders, menu }) {
+  const categories = computeItemBreakdown(orders, menu);
+  if (categories.length === 0) return null;
+  const grandQty = categories.reduce((s, c) => s + c.qty, 0);
+  const grandRevenue = categories.reduce((s, c) => s + c.revenue, 0);
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Plates sold by item</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Across all orders, paid and unpaid</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {rows.map((r) => (
-          <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
-            <div style={{ fontSize: 14 }}>{r.key}</div>
-            <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-              <span style={{ fontSize: 13, color: C.muted }}>{r.qty} plate{r.qty === 1 ? "" : "s"}</span>
-              <span style={{ ...displayNum, fontSize: 14, color: C.moss }}>{money(r.revenue)}</span>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Across all orders, paid and unpaid — grouped by category</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {categories.map((cat) => (
+          <div key={cat.name}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{cat.name}</div>
+              <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                <span style={{ fontSize: 12, color: C.muted }}>{cat.qty} plate{cat.qty === 1 ? "" : "s"}</span>
+                <span style={{ ...displayNum, fontSize: 13, color: C.moss }}>{money(cat.revenue)}</span>
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {cat.rows.map((r, idx) => (
+                <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 14 }}><span style={{ color: C.muted, marginRight: 8 }}>{idx + 1}.</span>{r.key}</div>
+                  <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+                    <span style={{ fontSize: 13, color: C.muted }}>{r.qty} plate{r.qty === 1 ? "" : "s"}</span>
+                    <span style={{ ...displayNum, fontSize: 14, color: C.moss }}>{money(r.revenue)}</span>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         ))}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0 0" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0 0", borderTop: `1px solid ${C.border}` }}>
           <div style={{ fontSize: 14, fontWeight: 700 }}>Total, all categories</div>
           <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>{totalQty} plate{totalQty === 1 ? "" : "s"}</span>
-            <span style={{ ...displayNum, fontSize: 15, color: C.ember }}>{money(totalRevenue)}</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>{grandQty} plate{grandQty === 1 ? "" : "s"}</span>
+            <span style={{ ...displayNum, fontSize: 15, color: C.ember }}>{money(grandRevenue)}</span>
           </div>
         </div>
       </div>
@@ -1472,7 +1591,12 @@ function PaymentTypeTotals({ orders, credits }) {
 function findPaymentGaps(orders) {
   return orders
     .filter((o) => o.paid)
-    .map((o) => ({ order: o, gap: (Number(o.total) || 0) - paymentsTotal(o) }))
+    // The real amount owed is whichever is higher: the bill total, or a
+    // recorded amountReceived (from "Paid more than the bill?") -- an
+    // overpayment logged before the fix that makes that extra amount show
+    // up in the payments ledger would otherwise look fully accounted for
+    // here (logged == total) while the actual cash received was higher.
+    .map((o) => ({ order: o, gap: Math.max(Number(o.total) || 0, Number(o.amountReceived) || 0) - paymentsTotal(o) }))
     .filter((x) => x.gap > 0.01);
 }
 
@@ -1515,7 +1639,7 @@ function PaymentGapReconciler({ orders, onAddPayment }) {
         <div>
           <div style={{ ...cardTitle, color: C.danger, marginBottom: 4 }}>{gaps.length} order{gaps.length === 1 ? "" : "s"} under-logged by {money(totalGap)} total</div>
           <div style={{ fontSize: 12, color: C.muted }}>
-            These are marked Paid but their logged payments don't add up to the full total — almost always from an item added or a price fixed after the order was already marked paid. Fixing one logs the missing amount using the payment method already on file for that order.
+            These are marked Paid but their logged payments don't add up to the full amount owed — usually from an item added/price fixed after being marked paid, or an overpayment recorded before that specific fix existed. Fixing one logs the missing amount using the payment method already on file for that order.
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
@@ -1530,7 +1654,7 @@ function PaymentGapReconciler({ orders, onAddPayment }) {
           <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px", gap: 10, flexWrap: "wrap" }}>
             <div style={{ fontSize: 13 }}>
               <span style={{ fontWeight: 600 }}>{o.customer}</span>
-              <span style={{ color: C.muted }}> — logged {money(paymentsTotal(o))} of {money(o.total)} ({o.paymentMethod || "Cash"})</span>
+              <span style={{ color: C.muted }}> — logged {money(paymentsTotal(o))} of {money(Math.max(o.total, o.amountReceived || 0))} ({o.paymentMethod || "Cash"})</span>
             </div>
             <button onClick={() => fixOne(o, gap)} disabled={fixingId === o.id || fixingAll} className="om-btn" style={quickTagBtn}>
               {fixingId === o.id ? <Loader2 className="om-spin" size={11} /> : null} Log missing {money(gap)}
@@ -1623,7 +1747,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
       <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
       <PaymentTypeTotals orders={orders} credits={credits} />
       <DailyBreakdown orders={orders} />
-      <SalesBreakdown orders={orders} />
+      <SalesBreakdown orders={orders} menu={menu} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
 
       <div style={{ ...card, marginTop: 18, marginBottom: 18 }}>
