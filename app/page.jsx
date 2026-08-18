@@ -1,6 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox } from "lucide-react";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -1161,23 +1162,6 @@ function AmountReceivedPicker({ order, onConfirm, onCancel }) {
       </div>
     </div>
   );
-}
-
-const PAYMENT_METHODS = ["Cash", "Zelle", "Debit Card", "Credit Card"];
-const INTERNAL_METHOD = "Internal (deducted, no cash)";
-
-// Sum of an order's actual logged payments. Older orders saved before this
-// feature existed have no `payments` array at all -- if they're marked
-// paid, treat that as one legacy payment of the full total (in whatever
-// single method was on file) so reporting doesn't silently drop them;
-// same defensive-normalization idea as normalizeMenu() in lib/defaults.js.
-function effectivePayments(order) {
-  if (Array.isArray(order.payments) && order.payments.length > 0) return order.payments;
-  if (order.paid) return [{ id: "legacy-" + order.id, method: order.paymentMethod || "Cash", amount: Number(order.total) || 0, ts: order.ts, collectedBy: order.collectedBy || "" }];
-  return [];
-}
-function paymentsTotal(order) {
-  return effectivePayments(order).reduce((s, p) => s + (Number(p.amount) || 0), 0);
 }
 
 // Trims the most-recently-logged payments first when the amount actually
