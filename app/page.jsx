@@ -193,7 +193,10 @@ export default function HomePage() {
       if (res.menu) setMenu(res.menu);
       if (res.partners) setPartners(res.partners);
       if (res.credits) setCredits(res.credits);
-      return { ok: true };
+      // Spread the rest of the response through too (e.g. sync-sheets'
+      // per-tab results) -- purely additive, every existing caller only
+      // ever reads .ok/.error so this can't break anything already there.
+      return { ok: true, ...res };
     } catch (err) {
       return { ok: false, error: err.message || "Something went wrong. Please try again." };
     }
@@ -390,7 +393,8 @@ export default function HomePage() {
             onUpdateItem={(groupId, item) => act("menu", "update-item", { groupId, item })}
             onRemoveItem={(groupId, itemId) => act("menu", "remove-item", { groupId, itemId })}
             onRenamePartner={(id, name) => act("partners", "rename", { id, name })}
-            onResetMenu={() => act("menu", "reset", {})} />
+            onResetMenu={() => act("menu", "reset", {})}
+            onSyncSheets={() => act("sync-sheets", "run", {})} />
         )}
       </div>
     </div>
@@ -717,7 +721,11 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
     if (!forPartner && creditToApply > 0) {
-      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, note: "Applied to a new order" });
+      // Tagged with method: "Cash" so this flows through the same
+      // reconciliation as a direct reimbursement -- using credit toward a
+      // new order still counts as "using it," so it comes off the Cash
+      // total the same way handing cash back would.
+      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", note: "Applied to a new order" });
     }
     setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
   };
@@ -876,22 +884,6 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     const g = menu[0]; const it = firstItem(g);
     const v = firstVariant(it);
     setLines([...lines, { id: uid(), groupId: g?.id || "", itemId: it?.id || "", variantId: v?.id || "", qty: 1, price: v?.price ?? "" }]);
-  };
-  // Trims the most-recently-logged payments first when a bill shrinks
-  // below what's already been logged as paid -- e.g. an item gets removed
-  // after the order was marked paid. Keeps the ledger's total in sync with
-  // the new, lower bill without needing a separate refund flow for this
-  // edit-time correction.
-  const trimPayments = (payments, amountToRemove) => {
-    let remaining = amountToRemove;
-    const result = [];
-    for (let i = payments.length - 1; i >= 0; i--) {
-      const p = payments[i];
-      if (remaining <= 0.001) { result.unshift(p); continue; }
-      if (p.amount <= remaining + 0.001) { remaining -= p.amount; }
-      else { result.unshift({ ...p, amount: p.amount - remaining }); remaining = 0; }
-    }
-    return result;
   };
   const save = async () => {
     if (!customer.trim()) { setError("Customer name is required."); return; }
@@ -1188,6 +1180,23 @@ function paymentsTotal(order) {
   return effectivePayments(order).reduce((s, p) => s + (Number(p.amount) || 0), 0);
 }
 
+// Trims the most-recently-logged payments first when the amount actually
+// owed on an order drops below what's already been logged as paid -- e.g.
+// an item gets removed after the order was marked paid, or a previously
+// recorded overpayment gets corrected downward. Keeps the ledger's total
+// in sync with the new, lower amount without a separate refund flow.
+function trimPayments(payments, amountToRemove) {
+  let remaining = amountToRemove;
+  const result = [];
+  for (let i = payments.length - 1; i >= 0; i--) {
+    const p = payments[i];
+    if (remaining <= 0.001) { result.unshift(p); continue; }
+    if (p.amount <= remaining + 0.001) { remaining -= p.amount; }
+    else { result.unshift({ ...p, amount: p.amount - remaining }); remaining = 0; }
+  }
+  return result;
+}
+
 function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
   const alreadyPaid = paymentsTotal(order);
   const remaining = Math.max(0, order.total - alreadyPaid);
@@ -1304,9 +1313,52 @@ function CreditEditForm({ entry, onSave, onCancel }) {
   );
 }
 
-function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
+function CreditReimburseForm({ balance, onConfirm, onCancel }) {
+  const [method, setMethod] = useState("Cash");
+  const [amount, setAmount] = useState(balance.toFixed(2));
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false);
+
+  const confirm = async () => {
+    if (submittedRef.current) return;
+    const amt = Number(amount);
+    if (!(amt > 0)) { setError("Enter an amount greater than 0."); return; }
+    if (amt > balance + 0.001) { setError(`Can't reimburse more than the ${money(balance)} owed.`); return; }
+    submittedRef.current = true;
+    setError("");
+    setSubmitting(true);
+    const res = await onConfirm(method, amt);
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
+  };
+
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.ember}` }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Reimburse — {money(balance)} owed</div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 130px" }} value={method} onChange={(e) => setMethod(e.target.value)}>
+          {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
+          value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+      </div>
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>This is logged as money paid out, so it's deducted from the {method} total above.</div>
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Log reimbursement"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCredit }) {
   const [expandedCustomer, setExpandedCustomer] = useState(null);
   const [editingEntryId, setEditingEntryId] = useState(null);
+  const [reimbursingCustomer, setReimbursingCustomer] = useState(null);
 
   const byCustomer = {};
   credits.forEach((c) => {
@@ -1333,8 +1385,26 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
               <div style={{ ...displayNum, fontSize: 14, color: c.balance > 0 ? C.ember : C.muted, marginRight: 8 }}>
                 {c.balance > 0 ? `${money(c.balance)} owed` : money(c.balance)}
               </div>
+              {c.balance > 0.001 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setReimbursingCustomer(reimbursingCustomer === c.customer ? null : c.customer); }}
+                  className="om-btn" style={{ ...quickTagBtn, marginRight: 8 }}>
+                  Reimburse
+                </button>
+              )}
               <span style={{ fontSize: 12, color: C.muted }}>{expandedCustomer === c.customer ? "hide" : "details"}</span>
             </div>
+            {reimbursingCustomer === c.customer && (
+              <div style={{ marginTop: 6 }}>
+                <CreditReimburseForm balance={c.balance}
+                  onConfirm={async (method, amt) => {
+                    const res = await onAddCredit({ customer: c.customer, amount: -amt, method, note: `Reimbursed via ${method}` });
+                    if (res.ok) setReimbursingCustomer(null);
+                    return res;
+                  }}
+                  onCancel={() => setReimbursingCustomer(null)} />
+              </div>
+            )}
             {expandedCustomer === c.customer && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, marginLeft: 12 }}>
                 {c.entries.map((entry) =>
@@ -1345,7 +1415,7 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
                   ) : (
                     <div key={entry.id} style={{ ...rowCard, padding: "8px 12px" }}>
                       <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13 }}>{entry.note || "(no note)"}</div>
+                        <div style={{ fontSize: 13 }}>{entry.note || "(no note)"}{entry.method ? ` (${entry.method})` : ""}</div>
                         <div style={{ fontSize: 11, color: C.muted }}>{new Date(entry.ts).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}</div>
                       </div>
                       <div style={{ ...displayNum, fontSize: 13, color: entry.amount >= 0 ? C.ember : C.muted, marginRight: 10 }}>
@@ -1365,7 +1435,7 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit }) {
   );
 }
 
-function computePaymentTypeTotals(orders) {
+function computePaymentTypeTotals(orders, credits) {
   const map = {};
   // Every logged payment counts toward the drawer, whether or not the
   // order it belongs to is fully paid yet -- a $20 cash payment on a
@@ -1376,18 +1446,26 @@ function computePaymentTypeTotals(orders) {
       map[method] = (map[method] || 0) + (Number(p.amount) || 0);
     });
   });
+  // Credit reimbursements (money physically paid OUT to settle a credit
+  // balance) reduce whichever method it was paid out from. Only entries
+  // tagged with a `method` count here -- an ordinary credit adjustment or
+  // credit applied toward a new order has no `method`, since neither of
+  // those moves real money out of the drawer.
+  (credits || []).forEach((c) => {
+    if (c.method) map[c.method] = (map[c.method] || 0) + (Number(c.amount) || 0); // amount is already negative
+  });
   const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
   const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
   return [...realMethods, ...internal];
 }
 
-function PaymentTypeTotals({ orders }) {
-  const rows = computePaymentTypeTotals(orders);
+function PaymentTypeTotals({ orders, credits }) {
+  const rows = computePaymentTypeTotals(orders, credits);
   if (rows.length === 0) return null;
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Total by payment method</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment actually logged so far, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment logged so far minus any reimbursements paid out, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {rows.map((r) => (
           <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${r.internal ? C.warning : C.border}`, borderRadius: 10, padding: "10px 12px" }}>
@@ -1518,7 +1596,24 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
     const previousChange = Math.max(0, previousReceived - order.total);
     const newChange = Math.max(0, amountReceived - order.total);
     const delta = newChange - previousChange; // only the difference gets logged, not the whole amount again
-    await onUpdate({ ...order, amountReceived });
+
+    // The extra cash actually handed over needs to show up in the Cash
+    // Drawer total too, not just as a credit liability -- the customer
+    // really did hand over that much money at the time of the order, using
+    // whatever method the order itself was paid in. Without this, the app
+    // only ever counted the order's bill amount as money received, even
+    // though more physically went into the drawer.
+    const alreadyLogged = paymentsTotal(order);
+    const targetLogged = order.total + newChange;
+    const gap = targetLogged - alreadyLogged;
+    let payments = effectivePayments(order);
+    if (gap > 0.001) {
+      payments = [...payments, { id: uid(), method: order.paymentMethod || "Cash", amount: gap, collectedBy: "", ts: Date.now() }];
+    } else if (gap < -0.001) {
+      payments = trimPayments(payments, -gap);
+    }
+
+    await onUpdate({ ...order, amountReceived, payments });
     if (delta !== 0) {
       await onAddCredit({
         customer: order.customer, amount: delta,
@@ -1540,9 +1635,9 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
 
   return (
     <div>
-      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} />
+      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
       <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
-      <PaymentTypeTotals orders={orders} />
+      <PaymentTypeTotals orders={orders} credits={credits} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
@@ -2269,7 +2364,40 @@ function ResetMenuButton({ onReset }) {
   );
 }
 
-function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner, onResetMenu }) {
+function SyncSheetsButton({ onSync }) {
+  const [status, setStatus] = useState("idle"); // idle | syncing | success | error
+  const [message, setMessage] = useState("");
+
+  const run = async () => {
+    setStatus("syncing");
+    setMessage("");
+    const res = await onSync();
+    if (res && res.ok === false) {
+      setStatus("error");
+      setMessage(res.error || "Sync failed.");
+    } else {
+      setStatus("success");
+      const counts = ["Orders", "Expenses", "Withdrawals"]
+        .map((tab) => (res?.[tab]?.rowsWritten !== undefined ? `${res[tab].rowsWritten} ${tab.toLowerCase()}` : null))
+        .filter(Boolean)
+        .join(", ");
+      setMessage(counts ? `Synced ${counts}.` : "Synced.");
+    }
+  };
+
+  return (
+    <div>
+      <button onClick={run} disabled={status === "syncing"} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: status === "syncing" ? 0.7 : 1 }} className="om-btn">
+        {status === "syncing" ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {status === "syncing" ? "Syncing..." : "Sync to Google Sheet"}
+      </button>
+      {message && (
+        <div style={{ fontSize: 12, marginTop: 6, color: status === "error" ? C.danger : C.moss }}>{message}</div>
+      )}
+    </div>
+  );
+}
+
+function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner, onResetMenu, onSyncSheets }) {
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
@@ -2289,8 +2417,15 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, on
       <CustomerOrderLinkCard />
       <div style={{ ...card, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div>
+          <div style={cardTitle}>Google Sheets backup</div>
+          <div style={{ fontSize: 13, color: C.muted }}>Runs automatically every night, plus you can trigger it manually any time.</div>
+        </div>
+        <SyncSheetsButton onSync={onSyncSheets} />
+      </div>
+      <div style={{ ...card, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
           <div style={cardTitle}>Backup your data</div>
-          <div style={{ fontSize: 13, color: C.muted }}>Download a copy of everything, in addition to the automatic Google Sheets backup.</div>
+          <div style={{ fontSize: 13, color: C.muted }}>Download a copy of everything, in addition to the Google Sheets backup.</div>
         </div>
         <button onClick={() => exportBackup(backupData)} style={{ ...primaryBtn, width: "auto", marginTop: 0 }} className="om-btn"><Download size={15} /> Download backup</button>
       </div>

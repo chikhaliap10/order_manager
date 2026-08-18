@@ -1,6 +1,7 @@
 import { getKey, setKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
 import { uid, defaultMenu } from "../../../lib/defaults";
+import { syncAllToSheets } from "../../../lib/sheets";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,22 @@ export async function POST(req) {
     }
 
     const { resource, action, payload } = await req.json();
+
+    // ---------- MANUAL GOOGLE SHEETS SYNC ----------
+    // Same sync work the nightly cron job runs (app/api/sync-sheets/route.js),
+    // just triggered on demand from the Setup tab. Reuses the exact same
+    // function so the two triggers can never write different data -- this
+    // route is already gated by isAuthed() above, so no separate secret is
+    // needed for the manual button.
+    if (resource === "sync-sheets") {
+      const result = await syncAllToSheets({ getKey, getOrInitPartners });
+      const failures = ["Orders", "Expenses", "Withdrawals"].filter((tab) => result[tab] && result[tab].success === false);
+      if (failures.length > 0) {
+        const firstError = failures.map((tab) => result[tab].error).find(Boolean) || "Unknown error.";
+        return badRequest(`Sheets sync failed for ${failures.join(", ")}: ${firstError}`);
+      }
+      return Response.json(result);
+    }
 
     // ---------- ORDERS ----------
     if (resource === "order") {
@@ -187,14 +204,20 @@ export async function POST(req) {
         if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
         if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
         let credits = await getKey("credits", []);
-        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", ts: Date.now() }, ...credits];
+        // `method` is only set when this entry represents money actually
+        // paid OUT to reimburse a customer (e.g. "Reimbursed via Cash")
+        // -- an ordinary credit adjustment or credit applied toward a new
+        // order leaves it unset, since neither of those move real money.
+        // computePaymentTypeTotals uses its presence to tell the two
+        // apart.
+        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method || "", ts: Date.now() }, ...credits];
         await setKey("credits", credits);
         return Response.json({ credits });
       } else if (action === "update") {
         if (!payload?.customer?.trim()) return badRequest("Customer name is required.");
         if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
         let credits = await getKey("credits", []);
-        credits = credits.map((c) => (c.id === payload.id ? { ...c, customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "" } : c));
+        credits = credits.map((c) => (c.id === payload.id ? { ...c, customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method !== undefined ? payload.method : (c.method || "") } : c));
         await setKey("credits", credits);
         return Response.json({ credits });
       } else if (action === "delete") {
