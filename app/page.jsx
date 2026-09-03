@@ -1,6 +1,6 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox } from "lucide-react";
+import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
 import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -24,6 +24,31 @@ function tsToDateString(ts) {
 }
 function todayDateString() {
   return tsToDateString(Date.now());
+}
+// Filters orders to a plate-totals reporting period. "today"/"month" use
+// calendar-day/calendar-month comparisons (via tsToDateString, consistent
+// with the rest of the app's date handling) rather than raw millisecond
+// math, so an order placed at 11pm still counts as "today" regardless of
+// timezone quirks. "week" is a simple rolling last-7-days window.
+function filterOrdersByPeriod(orders, period) {
+  if (period === "all") return orders;
+  const now = Date.now();
+  if (period === "today") {
+    const todayStr = todayDateString();
+    return orders.filter((o) => tsToDateString(o.ts || now) === todayStr);
+  }
+  if (period === "week") {
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    return orders.filter((o) => now - (o.ts || now) <= weekMs && now - (o.ts || now) >= 0);
+  }
+  if (period === "month") {
+    const nowDate = new Date(now);
+    return orders.filter((o) => {
+      const d = new Date(o.ts || now);
+      return d.getMonth() === nowDate.getMonth() && d.getFullYear() === nowDate.getFullYear();
+    });
+  }
+  return orders;
 }
 // Referenced at both order-creation and order-edit phone fields but was
 // never actually defined -- same bug class as the earlier
@@ -320,6 +345,8 @@ export default function HomePage() {
     { id: "incoming", label: "Incoming", icon: Inbox, badge: incomingCount },
     { id: "orders", label: "New order", icon: Receipt },
     { id: "history", label: "Order history", icon: History },
+    { id: "summary", label: "Summary", icon: BarChart3 },
+    { id: "plates", label: "Plate totals", icon: ClipboardList },
     { id: "expenses", label: "Expenses", icon: Wallet },
     { id: "partners", label: "Partner shares", icon: Users },
     { id: "settings", label: "Setup", icon: Settings2 },
@@ -363,14 +390,22 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits}
+          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })}
+            onAddCredit={(entry) => act("credits", "create", entry)} />
+        )}
+        {tab === "summary" && (
+          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} totals={totals}
+            onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onAddCredit={(entry) => act("credits", "create", entry)}
             onUpdateCredit={(entry) => act("credits", "update", entry)}
             onDeleteCredit={(id) => act("credits", "delete", { id })} />
+        )}
+        {tab === "plates" && (
+          <PlateTotalsTab orders={visibleOrders} menu={menu} />
         )}
         {tab === "expenses" && (
           <ExpensesTab expenses={expenses} partners={partners}
@@ -1699,7 +1734,226 @@ function PaymentGapReconciler({ orders, onAddPayment }) {
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddPayment, onUpdate, onDelete, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+function KpiCards({ orders, totals }) {
+  const totalPlates = orders.reduce((s, o) => s + (o.items || []).reduce((s2, i) => s2 + (Number(i.qty) || 0), 0), 0);
+  const totalOrders = orders.length;
+  const totalBillValue = orders.reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const avgOrder = totalOrders > 0 ? totalBillValue / totalOrders : 0;
+
+  const cards = [
+    { label: "Revenue collected", value: money(totals.income), color: C.moss },
+    { label: "Still owed", value: money(totals.pending), color: C.ember },
+    { label: "Plates sold", value: String(totalPlates), color: C.mossDark },
+    { label: "Avg order value", value: money(avgOrder), color: C.warning },
+  ];
+
+  return (
+    <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+      {cards.map((c) => (
+        <div key={c.label} style={{ ...card, flex: "1 1 180px", borderTop: `3px solid ${c.color}` }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>{c.label}</div>
+          <div style={{ ...displayNum, fontSize: 24, color: c.color }}>{c.value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function DailyBarChart({ orders }) {
+  // Most-recent-first from computeDailyBreakdown -> reversed to chronological
+  // (oldest to newest, left to right) and capped to the last 14 days that
+  // actually had orders, so the chart stays legible.
+  const days = computeDailyBreakdown(orders).slice(0, 14).reverse();
+  if (days.length === 0) return null;
+  const max = Math.max(...days.map((d) => d.revenue), 1);
+  return (
+    <div style={{ ...card, marginBottom: 18 }}>
+      <div style={cardTitle}>Revenue trend</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>Last {days.length} day{days.length === 1 ? "" : "s"} with orders</div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 150 }}>
+        {days.map((d) => (
+          <div key={d.dateKey} title={`${d.label}: ${money(d.revenue)} (${d.plates} plates)`}
+            style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%", minWidth: 0 }}>
+            <div style={{ fontSize: 10, color: C.muted, marginBottom: 4, whiteSpace: "nowrap" }}>{money(d.revenue).replace(".00", "")}</div>
+            <div style={{ width: "70%", minHeight: 3, height: `${Math.max(4, (d.revenue / max) * 100)}%`, background: `linear-gradient(180deg, ${C.mossDark}, ${C.moss})`, borderRadius: "4px 4px 0 0" }} />
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", width: "100%", textAlign: "center" }}>{d.label.split(",")[0]}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const METHOD_COLORS = { Cash: "#43966B", Zelle: "#F0A868", "Debit Card": "#F0C24B", "Credit Card": "#F0796B" };
+
+function MethodBarChart({ orders, credits }) {
+  const rows = computePaymentTypeTotals(orders, credits).filter((r) => !r.internal && r.total > 0);
+  if (rows.length === 0) return null;
+  const max = Math.max(...rows.map((r) => r.total), 1);
+  return (
+    <div style={{ ...card, marginBottom: 18, flex: "1 1 320px" }}>
+      <div style={cardTitle}>Revenue by payment method</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {rows.map((r) => (
+          <div key={r.method}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+              <span>{r.method}</span>
+              <span style={{ ...displayNum, fontSize: 13 }}>{money(r.total)}</span>
+            </div>
+            <div style={{ height: 10, borderRadius: 999, background: C.paper, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.max(2, (r.total / max) * 100)}%`, background: METHOD_COLORS[r.method] || C.moss, borderRadius: 999 }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const CATEGORY_COLORS = ["#43966B", "#F0A868", "#F0C24B", "#F0796B", "#8FE0B3"];
+
+function CategoryBarChart({ orders, menu }) {
+  const categories = computeItemBreakdown(orders, menu).filter((c) => c.revenue > 0);
+  if (categories.length === 0) return null;
+  const max = Math.max(...categories.map((c) => c.revenue), 1);
+  return (
+    <div style={{ ...card, marginBottom: 18, flex: "1 1 320px" }}>
+      <div style={cardTitle}>Revenue by category</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {categories.map((c, i) => (
+          <div key={c.name}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+              <span>{c.name}</span>
+              <span style={{ ...displayNum, fontSize: 13 }}>{money(c.revenue)} · {c.qty} plate{c.qty === 1 ? "" : "s"}</span>
+            </div>
+            <div style={{ height: 10, borderRadius: 999, background: C.paper, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.max(2, (c.revenue / max) * 100)}%`, background: CATEGORY_COLORS[i % CATEGORY_COLORS.length], borderRadius: 999 }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// The Summary tab is a dedicated home for everything about how the
+// business is doing -- the KPI cards and two bar charts here are new,
+// visual additions; everything below them (PaymentGapReconciler,
+// PaymentTypeTotals, DailyBreakdown, SalesBreakdown, CustomerCreditsPanel)
+// is the exact same component, doing the exact same calculation, just
+// moved here from Order History (which is now just the order list) rather
+// than rewritten -- the underlying numbers are unchanged.
+// A dedicated, quantity-first view for kitchen prep planning -- "how many
+// of each item do we need to make," not revenue. Reuses
+// computeItemBreakdown (same category-matching, same swap/Coco merging)
+// but re-sorts everything by plate count instead of revenue, and adds a
+// period picker since "how many today" and "how many all-time" are very
+// different questions for prep.
+function PlateTotalsTab({ orders, menu }) {
+  const [period, setPeriod] = useState("today"); // today | week | month | all
+  const periods = [
+    ["today", "Today"],
+    ["week", "Last 7 days"],
+    ["month", "This month"],
+    ["all", "All time"],
+  ];
+  const periodLabel = periods.find((p) => p[0] === period)[1];
+
+  const filtered = filterOrdersByPeriod(orders, period);
+  const categories = computeItemBreakdown(filtered, menu)
+    .map((c) => ({ ...c, rows: [...c.rows].sort((a, b) => b.qty - a.qty) }))
+    .sort((a, b) => b.qty - a.qty);
+  const totalPlates = categories.reduce((s, c) => s + c.qty, 0);
+  const topItems = categories
+    .flatMap((c) => c.rows.map((r) => ({ ...r, category: c.name })))
+    .sort((a, b) => b.qty - a.qty)
+    .slice(0, 8);
+  const maxTopQty = Math.max(...topItems.map((r) => r.qty), 1);
+
+  return (
+    <div>
+      <div style={{ ...card, marginBottom: 18, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={cardTitle}>Plate totals</div>
+          <div style={{ fontSize: 12, color: C.muted }}>How many of each item sold — for kitchen prep planning</div>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {periods.map(([id, label]) => (
+            <button key={id} onClick={() => setPeriod(id)} className="om-btn"
+              style={{ ...tabBtn, padding: "7px 12px", fontSize: 13, background: period === id ? C.moss : "transparent", color: period === id ? "#FAF6EE" : C.muted, border: `1px solid ${period === id ? C.moss : C.border}` }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ ...card, marginBottom: 18, textAlign: "center" }}>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Total plates — {periodLabel.toLowerCase()}</div>
+        <div style={{ ...displayNum, fontSize: 48, color: C.moss }}>{totalPlates}</div>
+      </div>
+
+      {topItems.length > 0 && (
+        <div style={{ ...card, marginBottom: 18 }}>
+          <div style={cardTitle}>Top items by quantity</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+            {topItems.map((r, i) => (
+              <div key={`${r.category}-${r.key}`}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
+                  <span><span style={{ color: C.muted, marginRight: 6 }}>{i + 1}.</span>{r.key} <span style={{ color: C.muted, fontSize: 11 }}>({r.category})</span></span>
+                  <span style={{ ...displayNum, fontSize: 13 }}>{r.qty} plate{r.qty === 1 ? "" : "s"}</span>
+                </div>
+                <div style={{ height: 10, borderRadius: 999, background: C.paper, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${Math.max(2, (r.qty / maxTopQty) * 100)}%`, background: CATEGORY_COLORS[i % CATEGORY_COLORS.length], borderRadius: 999 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {totalPlates === 0 ? (
+        <div style={emptyState}>No orders in this period.</div>
+      ) : (
+        categories.map((cat) => (
+          <div key={cat.name} style={{ ...card, marginBottom: 18 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{cat.name}</div>
+              <div style={{ fontSize: 13, color: C.muted }}>{cat.qty} plate{cat.qty === 1 ? "" : "s"}</div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {cat.rows.map((r, idx) => (
+                <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 14 }}><span style={{ color: C.muted, marginRight: 8 }}>{idx + 1}.</span>{r.key}</div>
+                  <div style={{ ...displayNum, fontSize: 14 }}>{r.qty} plate{r.qty === 1 ? "" : "s"}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function SummaryTab({ menu, orders, partners, credits, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+  return (
+    <div>
+      <KpiCards orders={orders} totals={totals} />
+      <DailyBarChart orders={orders} />
+      <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+        <MethodBarChart orders={orders} credits={credits} />
+        <CategoryBarChart orders={orders} menu={menu} />
+      </div>
+      <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
+      <PaymentTypeTotals orders={orders} credits={credits} />
+      <DailyBreakdown orders={orders} />
+      <SalesBreakdown orders={orders} menu={menu} />
+      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
+    </div>
+  );
+}
+
+function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, onUpdate, onDelete, onAddCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
@@ -1709,6 +1963,7 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | paid | unpaid
   const [methodFilter, setMethodFilter] = useState("all"); // all | Cash | Zelle | Debit Card | Credit Card
+  const [collectorFilter, setCollectorFilter] = useState("all"); // all | shared | <partnerId>
 
   const handleToggle = async (id) => {
     setTogglingId(id);
@@ -1765,21 +2020,27 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
 
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
 
+  // Who personally collected any part of this order -- Zelle payments and
+  // internal partner-meal deductions can be attributed to a specific
+  // partner (see the payment-level collectedBy design); Cash/Debit/Credit
+  // never are, since that money always lands in the shared account/bank.
+  // A split payment could in principle have more than one collector, so
+  // this returns every distinct one, not just the first.
+  const orderCollectors = (o) =>
+    [...new Set(effectivePayments(o).filter((p) => (p.method === "Zelle" || p.method === INTERNAL_METHOD) && p.collectedBy).map((p) => p.collectedBy))];
+
   const filteredOrders = orders.filter((o) => {
     if (search.trim() && !o.customer.toLowerCase().includes(search.trim().toLowerCase())) return false;
     if (statusFilter === "paid" && !o.paid) return false;
     if (statusFilter === "unpaid" && o.paid) return false;
     if (methodFilter !== "all" && (o.paymentMethod || "Cash") !== methodFilter) return false;
+    if (collectorFilter === "shared" && orderCollectors(o).length > 0) return false;
+    if (collectorFilter !== "all" && collectorFilter !== "shared" && !orderCollectors(o).includes(collectorFilter)) return false;
     return true;
   });
 
   return (
     <div>
-      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
-      <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
-      <PaymentTypeTotals orders={orders} credits={credits} />
-      <DailyBreakdown orders={orders} />
-      <SalesBreakdown orders={orders} menu={menu} />
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
 
       <div style={{ ...card, marginTop: 18, marginBottom: 18 }}>
@@ -1799,6 +2060,14 @@ function OrderHistoryTab({ menu, orders, partners, credits, onTogglePaid, onAddP
             <select className="om-input" style={input} value={methodFilter} onChange={(e) => setMethodFilter(e.target.value)}>
               <option value="all">All</option>
               {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <label style={fieldLabel}>Collected by</label>
+            <select className="om-input" style={input} value={collectorFilter} onChange={(e) => setCollectorFilter(e.target.value)}>
+              <option value="all">All</option>
+              <option value="shared">Shared account</option>
+              {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           </div>
         </div>
