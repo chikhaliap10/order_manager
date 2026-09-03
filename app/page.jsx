@@ -2033,7 +2033,13 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
     if (search.trim() && !o.customer.toLowerCase().includes(search.trim().toLowerCase())) return false;
     if (statusFilter === "paid" && !o.paid) return false;
     if (statusFilter === "unpaid" && o.paid) return false;
-    if (methodFilter !== "all" && (o.paymentMethod || "Cash") !== methodFilter) return false;
+    // Checks the real payments ledger (any payment of this method,
+    // anywhere on the order), not just the single legacy paymentMethod
+    // field -- that field only ever reflects the order's *first* payment,
+    // so a split order (e.g. $100 Cash + $35 Zelle) would otherwise vanish
+    // from a "Zelle" filter entirely, even though its Zelle portion is
+    // correctly counted in the Total by payment method card above.
+    if (methodFilter !== "all" && !effectivePayments(o).some((p) => (p.method || "Cash") === methodFilter)) return false;
     if (collectorFilter === "shared" && orderCollectors(o).length > 0) return false;
     if (collectorFilter !== "all" && collectorFilter !== "shared" && !orderCollectors(o).includes(collectorFilter)) return false;
     return true;
