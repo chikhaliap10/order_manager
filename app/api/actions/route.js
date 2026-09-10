@@ -1,6 +1,6 @@
-import { getKey, setKey, getOrInitMenu, getOrInitPartners } from "../../../lib/kv";
+import { getKey, setKey, getOrInitMenu, getOrInitPartners, getOrInitDeliveryZones } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
-import { uid, defaultMenu } from "../../../lib/defaults";
+import { uid, defaultMenu, defaultDeliveryZones } from "../../../lib/defaults";
 import { syncAllToSheets } from "../../../lib/sheets";
 
 export const dynamic = "force-dynamic";
@@ -188,6 +188,15 @@ export async function POST(req) {
       let partners = await getOrInitPartners();
       if (action === "rename") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name.trim() } : p));
+      } else if (action === "set-inactive") {
+        // Freezes this partner out of future profit splits as of right now,
+        // without touching any past order/expense they're already
+        // attached to -- see the perPartnerShare calculation in page.jsx
+        // for why a timestamp (not just a boolean) is what makes past
+        // periods stay correct.
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: Date.now() } : p));
+      } else if (action === "reactivate") {
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: null } : p));
       }
       await setKey("partners", partners);
       return Response.json({ partners });
@@ -227,6 +236,32 @@ export async function POST(req) {
         return Response.json({ credits });
       }
       return Response.json({ error: "unknown action" }, { status: 400 });
+    }
+
+    // ---------- DELIVERY ZONES ----------
+    // A flat fee per named zone, used by the New Order form to add a
+    // delivery charge to an order's total. Kept fully editable here (not
+    // hardcoded) since delivery pricing changes -- see defaultDeliveryZones()
+    // in lib/defaults.js for the starting values.
+    if (resource === "delivery-zones") {
+      if ((action === "add" || action === "update") && !payload?.name?.trim()) return badRequest("Zone name is required.");
+      if ((action === "add" || action === "update") && !(Number(payload.fee) >= 0)) return badRequest("Fee must be zero or greater.");
+
+      let zones = await getOrInitDeliveryZones();
+
+      if (action === "reset") {
+        zones = defaultDeliveryZones();
+      } else if (action === "add") {
+        zones = [...zones, { id: uid(), name: payload.name.trim(), fee: Number(payload.fee) }];
+      } else if (action === "update") {
+        zones = zones.map((z) => (z.id === payload.id ? { ...z, name: payload.name.trim(), fee: Number(payload.fee) } : z));
+      } else if (action === "remove") {
+        zones = zones.filter((z) => z.id !== payload.id);
+      } else {
+        return Response.json({ error: "unknown action" }, { status: 400 });
+      }
+      await setKey("deliveryZones", zones);
+      return Response.json({ deliveryZones: zones });
     }
 
     return Response.json({ error: "unknown resource" }, { status: 400 });

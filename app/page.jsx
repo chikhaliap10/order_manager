@@ -244,6 +244,37 @@ export default function HomePage() {
     const pending = visibleOrders.reduce((s, o) => s + Math.max(0, (Number(o.total) || 0) - paymentsTotal(o)), 0);
     const expenseTotal = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
     const netProfit = income - expenseTotal;
+    // A partner who was active for only part of history shouldn't have
+    // that reshuffle everyone else's past shares -- so profit isn't just
+    // divided by today's partner count. Instead, every dollar is divided
+    // by however many partners were actually active AT THE TIME it was
+    // earned (or spent), and credited only to partners who were active
+    // then. A partner who goes inactive keeps everything they already
+    // earned up to that point; the partners who remain simply get a
+    // bigger slice of profit generated after that, without any
+    // retroactive recalculation of history.
+    const activePartnersAt = (ts) => partners.filter((p) => !p.inactiveSince || (ts || 0) < p.inactiveSince);
+    const perPartnerShare = {};
+    partners.forEach((p) => { perPartnerShare[p.id] = 0; });
+    visibleOrders.forEach((o) => {
+      const amt = paymentsTotal(o);
+      if (amt === 0) return;
+      const activeAt = activePartnersAt(o.ts);
+      if (activeAt.length === 0) return;
+      const per = amt / activeAt.length;
+      activeAt.forEach((p) => { perPartnerShare[p.id] += per; });
+    });
+    expenses.forEach((e) => {
+      const amt = Number(e.amount) || 0;
+      if (amt === 0) return;
+      const activeAt = activePartnersAt(e.ts);
+      if (activeAt.length === 0) return;
+      const per = amt / activeAt.length;
+      activeAt.forEach((p) => { perPartnerShare[p.id] -= per; });
+    });
+    // Still exposed as a flat number for anywhere that wants a rough
+    // "typical" share (e.g. an average across everyone) -- but each
+    // partner's real balance should use perPartnerShare[p.id], not this.
     const share = partners.length ? netProfit / partners.length : 0;
     const withdrawnByPartner = {};
     const collectedByPartner = {};
@@ -276,7 +307,7 @@ export default function HomePage() {
     });
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
-    return { income, pending, expenseTotal, netProfit, share, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, expensePercent, profitPercent };
+    return { income, pending, expenseTotal, netProfit, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, expensePercent, profitPercent };
   }, [visibleOrders, expenses, withdrawals, partners]);
 
   const GlobalStyle = () => (
@@ -417,7 +448,8 @@ export default function HomePage() {
           <PartnersTab partners={partners} totals={totals} withdrawals={withdrawals}
             onCreate={(w) => act("withdrawal", "create", w)}
             onUpdate={(w) => act("withdrawal", "update", w)}
-            onDelete={(id) => act("withdrawal", "delete", { id })} />
+            onDelete={(id) => act("withdrawal", "delete", { id })}
+            onToggleActive={(p) => act("partners", p.inactiveSince ? "reactivate" : "set-inactive", { id: p.id })} />
         )}
         {tab === "settings" && (
           <SettingsTab menu={menu} partners={partners}
@@ -785,7 +817,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
               <>
                 <label style={fieldLabel}>Which partner?</label>
                 <select className="om-input" style={input} value={partnerId} onChange={(e) => setPartnerId(e.target.value)}>
-                  {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
                 <label style={{ ...fieldLabel, marginTop: 12 }}>How is this being settled?</label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -1060,7 +1092,7 @@ function CollectorPicker({ order, partners, onConfirm, onCancel }) {
       <label style={fieldLabel}>Who collected this payment?</label>
       <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
         <option value="">Shared account</option>
-        {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
@@ -1420,7 +1452,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
               <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
                 value={r.collectedBy} onChange={(e) => updateRow(i, { collectedBy: e.target.value })}>
                 <option value="">Zelle → shared account</option>
-                {partners.map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
+                {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
               </select>
             )}
             {rows.length > 1 && (
@@ -2413,7 +2445,7 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete }) {
+function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onToggleActive }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -2441,12 +2473,17 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
           const withdrawn = totals.withdrawnByPartner[p.id] || 0;
           const collected = totals.collectedByPartner[p.id] || 0;
           const paidPersonally = totals.paidExpensesByPartner[p.id] || 0;
-          const balance = totals.share - withdrawn - collected + paidPersonally;
+          const myShare = totals.perPartnerShare[p.id] || 0;
+          const balance = myShare - withdrawn - collected + paidPersonally;
+          const isInactive = Boolean(p.inactiveSince);
           return (
-            <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${C.ember}`, textAlign: "left" }}>
-              <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 10 }}>{p.name}</div>
-              <div style={statLabel}>Lifetime share</div>
-              <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(totals.share)}</div>
+            <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>{p.name}</div>
+                {isInactive && <span style={{ fontSize: 11, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "2px 8px" }}>Inactive</span>}
+              </div>
+              <div style={statLabel}>Their share {isInactive ? "(frozen as of leaving)" : "(profit earned while active)"}</div>
+              <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(myShare)}</div>
               <div style={statLabel}>Withdrawn</div>
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(withdrawn)}</div>
               {collected > 0 && (
@@ -2463,9 +2500,17 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
               )}
               <div style={statLabel}>Current balance</div>
               <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(balance)}</div>
+              <div style={{ marginTop: 10 }}>
+                <button onClick={() => onToggleActive(p)} className="om-btn" style={quickTagBtn}>
+                  {isInactive ? "Reactivate" : "Mark inactive (leaving)"}
+                </button>
+              </div>
             </div>
           );
         })}
+      </div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 20, marginTop: -14 }}>
+        "Their share" is time-aware: profit is split by however many partners were active when it was earned, not today's headcount. Marking someone inactive doesn't change anyone's past numbers -- it only means future profit splits among fewer people.
       </div>
 
       <div style={card}>
