@@ -2602,7 +2602,7 @@ function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
         The negotiated final amount -- shown alongside the calculated balance, not instead of it, so nothing's hidden.
       </div>
       <input type="number" step="0.01" className="om-input" style={{ ...input, marginTop: 0 }} placeholder="e.g. 505.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
-      <input className="om-input" style={{ ...input, marginTop: 8 }} placeholder="Note (optional) -- e.g. \"Agreed flat settlement\"" value={note} onChange={(e) => setNote(e.target.value)} />
+      <input className="om-input" style={{ ...input, marginTop: 8 }} placeholder="Note (optional) -- e.g. 'Agreed flat settlement'" value={note} onChange={(e) => setNote(e.target.value)} />
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted, padding: "6px 10px", fontSize: 12 }} className="om-btn">Cancel</button>
