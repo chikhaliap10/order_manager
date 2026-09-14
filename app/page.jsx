@@ -763,6 +763,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [deliveryZoneId, setDeliveryZoneId] = useState("");
+  const [deliveryFeeInput, setDeliveryFeeInput] = useState("");
   const pastCustomerNames = useMemo(() => {
     const names = new Set();
     orders.forEach((o) => { if (o.customer?.trim()) names.add(o.customer.trim()); });
@@ -789,7 +790,13 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = forPartner ? 0 : Number(tip) || 0;
   const deliveryZone = deliveryZones.find((z) => z.id === deliveryZoneId);
-  const deliveryFee = forPartner ? 0 : (deliveryZone?.fee || 0);
+  const isCustomDelivery = deliveryZoneId === "custom";
+  // The fee always comes from this editable input, not directly from the
+  // zone -- picking a zone just pre-fills it as a starting point, so a
+  // one-off adjustment (or a location that isn't in the zone list at all,
+  // via "Custom") is always possible without touching Setup.
+  const deliveryFee = forPartner ? 0 : (Number(deliveryFeeInput) || 0);
+  const deliveryLabel = isCustomDelivery ? "Custom" : (deliveryZone?.name || "");
   // Only Prashant does deliveries right now, so there's no driver picker --
   // this just finds him by name. If a delivery zone is picked but no
   // partner named "Prashant" exists (e.g. renamed), the fee still counts
@@ -830,7 +837,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
           }
         : {
             id: uid(), customer: customer.trim(), phone: "", items, tip: tipAmount,
-            deliveryZone: deliveryZone?.name || "", deliveryFee, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
+            deliveryZone: deliveryLabel, deliveryFee, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -843,7 +850,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
       // total the same way handing cash back would.
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId("");
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId(""); setDeliveryFeeInput("");
   };
 
   return (
@@ -917,10 +924,26 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
                 <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
                 <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
                 <label style={{ ...fieldLabel, marginTop: 16 }}>Delivery (optional)</label>
-                <select className="om-input" style={{ ...input, width: 260 }} value={deliveryZoneId} onChange={(e) => setDeliveryZoneId(e.target.value)}>
-                  <option value="">Not a delivery / picked up</option>
-                  {deliveryZones.map((z) => <option key={z.id} value={z.id}>{z.name} — {money(z.fee)}</option>)}
-                </select>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <select className="om-input" style={{ ...input, width: 220, marginTop: 0 }} value={deliveryZoneId}
+                    onChange={(e) => {
+                      const zid = e.target.value;
+                      setDeliveryZoneId(zid);
+                      if (zid === "custom" || zid === "") setDeliveryFeeInput(zid === "" ? "" : deliveryFeeInput);
+                      else { const z = deliveryZones.find((zz) => zz.id === zid); setDeliveryFeeInput(z ? String(z.fee) : ""); }
+                    }}>
+                    <option value="">Not a delivery / picked up</option>
+                    {deliveryZones.map((z) => <option key={z.id} value={z.id}>{z.name} — {money(z.fee)}</option>)}
+                    <option value="custom">Custom (type your own fee)</option>
+                  </select>
+                  {deliveryZoneId && (
+                    <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 100, marginTop: 0 }}
+                      placeholder="Fee $" value={deliveryFeeInput} onChange={(e) => setDeliveryFeeInput(e.target.value)} />
+                  )}
+                </div>
+                {deliveryZoneId && deliveryFee === 0 && (
+                  <div style={{ fontSize: 12, color: C.warning, marginTop: 6 }}>Enter a delivery fee, or switch back to "Not a delivery" if there isn't one.</div>
+                )}
                 {deliveryFee > 0 && (
                   <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
                     {deliveryDriver
