@@ -189,12 +189,15 @@ export async function POST(req) {
       if (action === "rename") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name.trim() } : p));
       } else if (action === "set-inactive") {
-        // Freezes this partner out of future profit splits as of right now,
-        // without touching any past order/expense they're already
-        // attached to -- see the perPartnerShare calculation in page.jsx
-        // for why a timestamp (not just a boolean) is what makes past
-        // periods stay correct.
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: Date.now() } : p));
+        // Freezes this partner out of future profit splits as of a
+        // specific date -- not necessarily "right now". If they actually
+        // left a few days before you got around to clicking this, using
+        // Date.now() would wrongly keep counting them as active for any
+        // order entered in between. payload.inactiveSince (ms timestamp)
+        // lets you set the real departure date; falls back to now if
+        // omitted.
+        const ts = Number(payload.inactiveSince) || Date.now();
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: ts } : p));
       } else if (action === "reactivate") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: null } : p));
       }

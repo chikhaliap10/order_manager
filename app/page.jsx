@@ -29,8 +29,11 @@ function todayDateString() {
 // calendar-day/calendar-month comparisons (via tsToDateString, consistent
 // with the rest of the app's date handling) rather than raw millisecond
 // math, so an order placed at 11pm still counts as "today" regardless of
-// timezone quirks. "week" is a simple rolling last-7-days window.
-function filterOrdersByPeriod(orders, period) {
+// timezone quirks. "week" is a simple rolling last-7-days window. "custom"
+// takes an explicit {from, to} "YYYY-MM-DD" range (inclusive both ends) --
+// this is what lets you check any specific past day or stretch, like last
+// Saturday, that the fixed presets can't reach.
+function filterOrdersByPeriod(orders, period, customRange) {
   if (period === "all") return orders;
   const now = Date.now();
   if (period === "today") {
@@ -46,6 +49,12 @@ function filterOrdersByPeriod(orders, period) {
     return orders.filter((o) => {
       const d = new Date(o.ts || now);
       return d.getMonth() === nowDate.getMonth() && d.getFullYear() === nowDate.getFullYear();
+    });
+  }
+  if (period === "custom" && customRange?.from && customRange?.to) {
+    return orders.filter((o) => {
+      const d = tsToDateString(o.ts || now);
+      return d >= customRange.from && d <= customRange.to;
     });
   }
   return orders;
@@ -147,6 +156,7 @@ export default function HomePage() {
   const [expenses, setExpenses] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [credits, setCredits] = useState([]);
+  const [deliveryZones, setDeliveryZones] = useState([]);
   const [tab, setTab] = useState("orders");
 
   const refresh = async () => {
@@ -157,6 +167,7 @@ export default function HomePage() {
         setUnlocked(true);
         setMenu(data.menu); setPartners(data.partners); setOrders(data.orders);
         setExpenses(data.expenses); setWithdrawals(data.withdrawals); setCredits(data.credits || []);
+        setDeliveryZones(data.deliveryZones || []);
       } else {
         setUnlocked(false);
       }
@@ -219,6 +230,7 @@ export default function HomePage() {
       if (res.menu) setMenu(res.menu);
       if (res.partners) setPartners(res.partners);
       if (res.credits) setCredits(res.credits);
+      if (res.deliveryZones) setDeliveryZones(res.deliveryZones);
       // Spread the rest of the response through too (e.g. sync-sheets'
       // per-tab results) -- purely additive, every existing caller only
       // ever reads .ok/.error so this can't break anything already there.
@@ -242,8 +254,24 @@ export default function HomePage() {
     // away, and only the true remaining balance counts as pending.
     const income = visibleOrders.reduce((s, o) => s + paymentsTotal(o), 0);
     const pending = visibleOrders.reduce((s, o) => s + Math.max(0, (Number(o.total) || 0) - paymentsTotal(o)), 0);
+    // A delivery fee's driver cut (60%) goes straight to whoever delivered
+    // it -- undiluted, never split with other partners, and deliberately
+    // NOT modeled as an expense (an expense would get divided by
+    // partners.length before being credited back, shrinking their cut).
+    // Instead it's carved out of the shared pool entirely: netProfit only
+    // ever sees the remaining 40%, and the driver's 60% is tracked and
+    // credited to them directly, dollar for dollar.
+    const deliveryEarningsByPartner = {};
+    let totalDeliveryDriverEarnings = 0;
+    visibleOrders.forEach((o) => {
+      if (o.deliveryDriverId && Number(o.deliveryFee) > 0) {
+        const driverCut = Number(o.deliveryFee) * 0.6;
+        deliveryEarningsByPartner[o.deliveryDriverId] = (deliveryEarningsByPartner[o.deliveryDriverId] || 0) + driverCut;
+        totalDeliveryDriverEarnings += driverCut;
+      }
+    });
     const expenseTotal = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
-    const netProfit = income - expenseTotal;
+    const netProfit = income - expenseTotal - totalDeliveryDriverEarnings;
     // A partner who was active for only part of history shouldn't have
     // that reshuffle everyone else's past shares -- so profit isn't just
     // divided by today's partner count. Instead, every dollar is divided
@@ -257,8 +285,12 @@ export default function HomePage() {
     const perPartnerShare = {};
     partners.forEach((p) => { perPartnerShare[p.id] = 0; });
     visibleOrders.forEach((o) => {
-      const amt = paymentsTotal(o);
-      if (amt === 0) return;
+      let amt = paymentsTotal(o);
+      // The driver's 60% never enters the shared pool for this order --
+      // only the remaining amount (delivery's 40% + everything else) gets
+      // split among active partners below.
+      if (o.deliveryDriverId && Number(o.deliveryFee) > 0) amt -= Number(o.deliveryFee) * 0.6;
+      if (amt <= 0) return;
       const activeAt = activePartnersAt(o.ts);
       if (activeAt.length === 0) return;
       const per = amt / activeAt.length;
@@ -307,7 +339,7 @@ export default function HomePage() {
     });
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
-    return { income, pending, expenseTotal, netProfit, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, expensePercent, profitPercent };
+    return { income, pending, expenseTotal, netProfit, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, expensePercent, profitPercent };
   }, [visibleOrders, expenses, withdrawals, partners]);
 
   const GlobalStyle = () => (
@@ -416,7 +448,7 @@ export default function HomePage() {
             onDelete={(id) => act("order", "delete", { id })} />
         )}
         {tab === "orders" && (
-          <NewOrderTab menu={menu} partners={partners} credits={credits} orders={visibleOrders}
+          <NewOrderTab menu={menu} partners={partners} credits={credits} orders={visibleOrders} deliveryZones={deliveryZones}
             onCreate={(order) => act("order", "create", order)}
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
@@ -449,10 +481,11 @@ export default function HomePage() {
             onCreate={(w) => act("withdrawal", "create", w)}
             onUpdate={(w) => act("withdrawal", "update", w)}
             onDelete={(id) => act("withdrawal", "delete", { id })}
-            onToggleActive={(p) => act("partners", p.inactiveSince ? "reactivate" : "set-inactive", { id: p.id })} />
+            onSetInactive={(p, ts) => act("partners", "set-inactive", { id: p.id, inactiveSince: ts })}
+            onReactivate={(p) => act("partners", "reactivate", { id: p.id })} />
         )}
         {tab === "settings" && (
-          <SettingsTab menu={menu} partners={partners}
+          <SettingsTab menu={menu} partners={partners} deliveryZones={deliveryZones}
             backupData={{ menu, partners, orders, expenses, withdrawals }}
             onAddGroup={(name) => act("menu", "add-group", { name })}
             onRenameGroup={(groupId, name) => act("menu", "rename-group", { groupId, name })}
@@ -462,7 +495,10 @@ export default function HomePage() {
             onRemoveItem={(groupId, itemId) => act("menu", "remove-item", { groupId, itemId })}
             onRenamePartner={(id, name) => act("partners", "rename", { id, name })}
             onResetMenu={() => act("menu", "reset", {})}
-            onSyncSheets={() => act("sync-sheets", "run", {})} />
+            onSyncSheets={() => act("sync-sheets", "run", {})}
+            onAddDeliveryZone={(name, fee) => act("delivery-zones", "add", { name, fee })}
+            onUpdateDeliveryZone={(id, name, fee) => act("delivery-zones", "update", { id, name, fee })}
+            onRemoveDeliveryZone={(id) => act("delivery-zones", "remove", { id })} />
         )}
       </div>
     </div>
@@ -714,7 +750,7 @@ function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeho
   );
 }
 
-function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit }) {
+function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate, onAddCredit }) {
   const [customer, setCustomer] = useState("");
   const [tip, setTip] = useState("");
   const [applyCredit, setApplyCredit] = useState(false);
@@ -724,6 +760,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
   const [orderDate, setOrderDate] = useState(todayDateString());
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [deliveryZoneId, setDeliveryZoneId] = useState("");
   const pastCustomerNames = useMemo(() => {
     const names = new Set();
     orders.forEach((o) => { if (o.customer?.trim()) names.add(o.customer.trim()); });
@@ -749,7 +786,15 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = forPartner ? 0 : Number(tip) || 0;
-  const preTotal = subtotal + tipAmount;
+  const deliveryZone = deliveryZones.find((z) => z.id === deliveryZoneId);
+  const deliveryFee = forPartner ? 0 : (deliveryZone?.fee || 0);
+  // Only Prashant does deliveries right now, so there's no driver picker --
+  // this just finds him by name. If a delivery zone is picked but no
+  // partner named "Prashant" exists (e.g. renamed), the fee still counts
+  // as ordinary shared revenue; it just skips the personal delivery bonus
+  // rather than silently crediting the wrong person.
+  const deliveryDriver = partners.find((p) => p.name.trim().toLowerCase() === "prashant" && !p.inactiveSince);
+  const preTotal = subtotal + tipAmount + deliveryFee;
   const effectiveCustomer = forPartner ? (partners.find((p) => p.id === partnerId)?.name || "") : customer;
   const availableCredit = forPartner ? 0 : creditBalanceFor(credits, customer);
   const creditToApply = applyCredit && availableCredit > 0 ? Math.min(availableCredit, preTotal) : 0;
@@ -772,7 +817,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const finalTotal = itemsTotal + tipAmount - creditToApply;
+    const finalTotal = itemsTotal + tipAmount + deliveryFee - creditToApply;
     const ts = dateStringToTs(orderDate);
     const res = await onCreate(
       forPartner
@@ -783,6 +828,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
           }
         : {
             id: uid(), customer: customer.trim(), phone: "", items, tip: tipAmount,
+            deliveryZone: deliveryZone?.name || "", deliveryFee, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -795,7 +841,7 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
       // total the same way handing cash back would.
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]);
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId("");
   };
 
   return (
@@ -868,6 +914,18 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
               <>
                 <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
                 <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+                <label style={{ ...fieldLabel, marginTop: 16 }}>Delivery (optional)</label>
+                <select className="om-input" style={{ ...input, width: 260 }} value={deliveryZoneId} onChange={(e) => setDeliveryZoneId(e.target.value)}>
+                  <option value="">Not a delivery / picked up</option>
+                  {deliveryZones.map((z) => <option key={z.id} value={z.id}>{z.name} — {money(z.fee)}</option>)}
+                </select>
+                {deliveryFee > 0 && (
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
+                    {deliveryDriver
+                      ? `${money(deliveryFee * 0.6)} goes straight to ${deliveryDriver.name}, ${money(deliveryFee * 0.4)} to shared profit.`
+                      : `No active partner named "Prashant" found -- the full ${money(deliveryFee)} will count as ordinary shared revenue instead.`}
+                  </div>
+                )}
               </>
             )}
             <label style={{ ...fieldLabel, marginTop: 16 }}>Order date</label>
@@ -877,10 +935,10 @@ function NewOrderTab({ menu, partners, credits, orders, onCreate, onAddCredit })
             )}
             <ErrorText>{error}</ErrorText>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-              {(tipAmount > 0 || creditToApply > 0) && (
+              {(tipAmount > 0 || deliveryFee > 0 || creditToApply > 0) && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.muted, marginBottom: 6 }}>
                   <span>
-                    Subtotal {money(subtotal)}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{creditToApply > 0 ? ` − credit ${money(creditToApply)}` : ""}
+                    Subtotal {money(subtotal)}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{deliveryFee > 0 ? ` + delivery ${money(deliveryFee)}` : ""}{creditToApply > 0 ? ` − credit ${money(creditToApply)}` : ""}
                   </span>
                 </div>
               )}
@@ -1184,6 +1242,14 @@ function computeItemBreakdown(orders, menu) {
     if (cats.size === 1) unambiguousNameToCategory[name] = [...cats][0];
   });
   const cocoCategoryName = (menu || []).find((g) => g.name.trim().toLowerCase() === "coco")?.name || "Coco";
+  // Items that don't match anything (an old name, an ambiguous bare name
+  // like "Regular" that exists in more than one category) default into
+  // Gughara rather than a separate "Other" bucket -- that's genuinely
+  // where these items belong for this menu. Uses the live menu's actual
+  // Gughara category if one exists, so unmatched items merge into the
+  // SAME bucket as items that matched it properly, rather than creating a
+  // second, separate "Gughara"-looking group.
+  const fallbackCategoryName = (menu || []).find((g) => g.name.trim().toLowerCase() === "gughara")?.name || "Gughara";
 
   const splitLabel = (label) => {
     const m = label.match(/^(.*?)(?:\s*\((.*)\))?$/);
@@ -1216,7 +1282,7 @@ function computeItemBreakdown(orders, menu) {
       }
       if (cat) votes[cat] = (votes[cat] || 0) + qty;
     });
-    const category = Object.entries(votes).sort((a, z) => z[1] - a[1])[0]?.[0] || "Other";
+    const category = Object.entries(votes).sort((a, z) => z[1] - a[1])[0]?.[0] || fallbackCategoryName;
 
     // Within the Coco category specifically, relabel old size-as-item-name
     // rows ("12 OZ (Kaju)") to read as "Kaju (12 OZ)" for consistency with
@@ -1234,7 +1300,9 @@ function computeItemBreakdown(orders, menu) {
     rows[displayLabel].revenue += b.revenue;
   });
 
-  // Category order follows the live menu's Setup order, with "Other" last.
+  // Category order follows the live menu's Setup order, with unmatched
+  // items' fallback category (Gughara) sorting wherever it naturally
+  // falls in that same order.
   const categoryOrder = (menu || []).map((g) => g.name);
   const allCategoryNames = Object.keys(categories).sort((a, z) => {
     const ai = categoryOrder.indexOf(a), zi = categoryOrder.indexOf(z);
@@ -1882,20 +1950,24 @@ function CategoryBarChart({ orders, menu }) {
 // period picker since "how many today" and "how many all-time" are very
 // different questions for prep.
 function PlateTotalsTab({ orders, menu }) {
-  const [period, setPeriod] = useState("today"); // today | week | month | all
+  const [period, setPeriod] = useState("today"); // today | week | month | all | custom
+  const [customFrom, setCustomFrom] = useState(todayDateString());
+  const [customTo, setCustomTo] = useState(todayDateString());
   const periods = [
     ["today", "Today"],
     ["week", "Last 7 days"],
     ["month", "This month"],
     ["all", "All time"],
+    ["custom", "Custom"],
   ];
-  const periodLabel = periods.find((p) => p[0] === period)[1];
+  const periodLabel = period === "custom" ? `${customFrom} to ${customTo}` : periods.find((p) => p[0] === period)[1];
 
-  const filtered = filterOrdersByPeriod(orders, period);
+  const filtered = filterOrdersByPeriod(orders, period, { from: customFrom, to: customTo });
   const categories = computeItemBreakdown(filtered, menu)
     .map((c) => ({ ...c, rows: [...c.rows].sort((a, b) => b.qty - a.qty) }))
     .sort((a, b) => b.qty - a.qty);
   const totalPlates = categories.reduce((s, c) => s + c.qty, 0);
+  const totalRevenue = filtered.reduce((s, o) => s + paymentsTotal(o), 0);
   const topItems = categories
     .flatMap((c) => c.rows.map((r) => ({ ...r, category: c.name })))
     .sort((a, b) => b.qty - a.qty)
@@ -1919,9 +1991,29 @@ function PlateTotalsTab({ orders, menu }) {
         </div>
       </div>
 
-      <div style={{ ...card, marginBottom: 18, textAlign: "center" }}>
-        <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Total plates — {periodLabel.toLowerCase()}</div>
-        <div style={{ ...displayNum, fontSize: 48, color: C.moss }}>{totalPlates}</div>
+      {period === "custom" && (
+        <div style={{ ...card, marginBottom: 18, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div>
+            <label style={fieldLabel}>From</label>
+            <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={customFrom} max={customTo} onChange={(e) => setCustomFrom(e.target.value)} />
+          </div>
+          <div>
+            <label style={fieldLabel}>To</label>
+            <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={customTo} min={customFrom} max={todayDateString()} onChange={(e) => setCustomTo(e.target.value)} />
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, paddingBottom: 8 }}>e.g. set both to last Saturday to check just that day, or Saturday to Sunday for the weekend.</div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+        <div style={{ ...card, flex: "1 1 200px", textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Total plates — {periodLabel.toLowerCase()}</div>
+          <div style={{ ...displayNum, fontSize: 40, color: C.moss }}>{totalPlates}</div>
+        </div>
+        <div style={{ ...card, flex: "1 1 200px", textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Money collected — {periodLabel.toLowerCase()}</div>
+          <div style={{ ...displayNum, fontSize: 40, color: C.ember }}>{money(totalRevenue)}</div>
+        </div>
       </div>
 
       {topItems.length > 0 && (
@@ -2170,6 +2262,11 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
+                  {o.deliveryFee > 0 && (
+                    <div style={{ fontSize: 12, color: C.ember, marginTop: 2 }}>
+                      🚗 {o.deliveryZone || "Delivery"} — {money(o.deliveryFee)}{o.deliveryDriverId ? ` (${partnerName(o.deliveryDriverId) || "Unknown"}'s delivery)` : ""}
+                    </div>
+                  )}
                   {o.paid && (() => {
                     const payments = effectivePayments(o);
                     // Zelle can be personally received by a partner; so
@@ -2445,13 +2542,45 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onToggleActive }) {
+function InactiveDateForm({ partner, onConfirm, onCancel }) {
+  const [date, setDate] = useState(partner.inactiveSince ? tsToDateString(partner.inactiveSince) : todayDateString());
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const confirm = async () => {
+    if (!date) { setError("Pick a date."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onConfirm(dateStringToTs(date));
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
+  };
+
+  return (
+    <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: C.paper, border: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+        When did they actually leave? (Not necessarily today -- any order dated on/after this stops counting them.)
+      </div>
+      <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={date} onChange={(e) => { setDate(e.target.value); setError(""); }} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted, padding: "6px 10px", fontSize: 12 }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, padding: "6px 12px", fontSize: 12, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={13} /> : <Check size={13} />} Confirm
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState(null);
+  const [editingActiveDateFor, setEditingActiveDateFor] = useState(null);
   useEffect(() => { if (!partnerId && partners[0]) setPartnerId(partners[0].id); }, [partners]);
 
   const submit = async () => {
@@ -2473,14 +2602,15 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
           const withdrawn = totals.withdrawnByPartner[p.id] || 0;
           const collected = totals.collectedByPartner[p.id] || 0;
           const paidPersonally = totals.paidExpensesByPartner[p.id] || 0;
+          const deliveryEarnings = totals.deliveryEarningsByPartner[p.id] || 0;
           const myShare = totals.perPartnerShare[p.id] || 0;
-          const balance = myShare - withdrawn - collected + paidPersonally;
+          const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings;
           const isInactive = Boolean(p.inactiveSince);
           return (
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <div style={{ fontWeight: 600, fontSize: 15 }}>{p.name}</div>
-                {isInactive && <span style={{ fontSize: 11, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "2px 8px" }}>Inactive</span>}
+                {isInactive && <span style={{ fontSize: 11, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "2px 8px" }}>Inactive since {tsToDateString(p.inactiveSince)}</span>}
               </div>
               <div style={statLabel}>Their share {isInactive ? "(frozen as of leaving)" : "(profit earned while active)"}</div>
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(myShare)}</div>
@@ -2498,13 +2628,29 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(paidPersonally)}</div>
                 </>
               )}
+              {deliveryEarnings > 0 && (
+                <>
+                  <div style={statLabel}>Delivery earnings (60% of fees, direct)</div>
+                  <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(deliveryEarnings)}</div>
+                </>
+              )}
               <div style={statLabel}>Current balance</div>
               <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(balance)}</div>
-              <div style={{ marginTop: 10 }}>
-                <button onClick={() => onToggleActive(p)} className="om-btn" style={quickTagBtn}>
-                  {isInactive ? "Reactivate" : "Mark inactive (leaving)"}
-                </button>
+              <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {isInactive ? (
+                  <>
+                    <button onClick={() => onReactivate(p)} className="om-btn" style={quickTagBtn}>Reactivate</button>
+                    <button onClick={() => setEditingActiveDateFor(editingActiveDateFor === p.id ? null : p.id)} className="om-btn" style={quickTagBtn}>Fix departure date</button>
+                  </>
+                ) : (
+                  <button onClick={() => setEditingActiveDateFor(editingActiveDateFor === p.id ? null : p.id)} className="om-btn" style={quickTagBtn}>Mark inactive (leaving)</button>
+                )}
               </div>
+              {editingActiveDateFor === p.id && (
+                <InactiveDateForm partner={p}
+                  onConfirm={async (ts) => { const res = await onSetInactive(p, ts); if (res.ok) setEditingActiveDateFor(null); return res; }}
+                  onCancel={() => setEditingActiveDateFor(null)} />
+              )}
             </div>
           );
         })}
@@ -2857,7 +3003,70 @@ function SyncSheetsButton({ onSync }) {
   );
 }
 
-function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner, onResetMenu, onSyncSheets }) {
+function DeliveryZonesCard({ zones, onAdd, onUpdate, onRemove }) {
+  const [name, setName] = useState("");
+  const [fee, setFee] = useState("");
+  const [error, setError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editFee, setEditFee] = useState("");
+
+  const add = async () => {
+    if (!name.trim()) { setError("Zone name is required."); return; }
+    if (!(Number(fee) >= 0)) { setError("Fee must be zero or greater."); return; }
+    setError("");
+    setAdding(true);
+    const res = await onAdd(name.trim(), Number(fee));
+    setAdding(false);
+    if (res && !res.ok) { setError(res.error); return; }
+    setName(""); setFee("");
+  };
+
+  const startEdit = (z) => { setEditingId(z.id); setEditName(z.name); setEditFee(String(z.fee)); };
+  const saveEdit = async (id) => {
+    const res = await onUpdate(id, editName.trim(), Number(editFee));
+    if (res && res.ok) setEditingId(null);
+  };
+
+  return (
+    <div style={{ ...card, marginTop: 24 }}>
+      <div style={cardTitle}>Delivery zones & fees</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Used by the delivery picker on New Order. 60% of the fee goes straight to the delivering partner, 40% to shared profit.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+        {zones.map((z) => (
+          <div key={z.id} style={{ display: "flex", gap: 8, alignItems: "center", background: C.paper, borderRadius: 10, padding: 10 }}>
+            {editingId === z.id ? (
+              <>
+                <input className="om-input" style={{ ...input, marginTop: 0, flex: 2 }} value={editName} onChange={(e) => setEditName(e.target.value)} />
+                <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, width: 90 }} value={editFee} onChange={(e) => setEditFee(e.target.value)} />
+                <button onClick={() => saveEdit(z.id)} style={{ ...iconBtn, width: 32, height: 32 }} className="om-btn" aria-label="Save"><Check size={14} /></button>
+                <button onClick={() => setEditingId(null)} style={{ ...iconBtn, width: 32, height: 32 }} className="om-btn" aria-label="Cancel"><X size={14} /></button>
+              </>
+            ) : (
+              <>
+                <div style={{ flex: 1, fontSize: 14 }}>{z.name}</div>
+                <div style={{ ...displayNum, fontSize: 14 }}>{money(z.fee)}</div>
+                <button onClick={() => startEdit(z)} style={{ ...iconBtn, width: 32, height: 32 }} className="om-btn" aria-label="Edit"><Pencil size={13} /></button>
+                <ConfirmDelete label={`${z.name} zone`} onConfirm={() => onRemove(z.id)} />
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input className="om-input" style={{ ...input, marginTop: 0, flex: 2, minWidth: 160 }} placeholder="Zone name" value={name} onChange={(e) => { setName(e.target.value); setError(""); }} />
+        <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, width: 100 }} placeholder="Fee" value={fee} onChange={(e) => { setFee(e.target.value); setError(""); }} />
+        <button onClick={add} disabled={adding} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: adding ? 0.7 : 1 }} className="om-btn">
+          {adding ? <Loader2 className="om-spin" size={14} /> : <Plus size={14} />} Add zone
+        </button>
+      </div>
+      <ErrorText>{error}</ErrorText>
+    </div>
+  );
+}
+
+function SettingsTab({ menu, partners, deliveryZones, backupData, onAddGroup, onRenameGroup, onRemoveGroup, onAddItem, onUpdateItem, onRemoveItem, onRenamePartner, onResetMenu, onSyncSheets, onAddDeliveryZone, onUpdateDeliveryZone, onRemoveDeliveryZone }) {
   const [groupName, setGroupName] = useState("");
   const [groupError, setGroupError] = useState("");
   const [addingGroup, setAddingGroup] = useState(false);
@@ -2913,6 +3122,7 @@ function SettingsTab({ menu, partners, backupData, onAddGroup, onRenameGroup, on
         </div>
         <ErrorText>{groupError}</ErrorText>
       </div>
+      <DeliveryZonesCard zones={deliveryZones} onAdd={onAddDeliveryZone} onUpdate={onUpdateDeliveryZone} onRemove={onRemoveDeliveryZone} />
       <div style={{ ...card, marginTop: 20 }}>
         <div style={cardTitle}>Partner names</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
