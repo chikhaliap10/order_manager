@@ -200,6 +200,18 @@ export async function POST(req) {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: ts } : p));
       } else if (action === "reactivate") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, inactiveSince: null } : p));
+      } else if (action === "set-settlement") {
+        // A manual override for the final payout amount -- for when a
+        // negotiated number simply doesn't match what the formula says,
+        // for any reason (a compromise, a rounding agreement, etc.). Kept
+        // as its own field rather than editing share/withdrawn/collected
+        // directly, so the calculated numbers stay visible and honest
+        // alongside it -- this replaces the DISPLAYED "what to pay them"
+        // figure, not the underlying math.
+        if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: payload.amount, settlementNote: payload.note || "" } : p));
+      } else if (action === "clear-settlement") {
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: null, settlementNote: "" } : p));
       }
       await setKey("partners", partners);
       return Response.json({ partners });

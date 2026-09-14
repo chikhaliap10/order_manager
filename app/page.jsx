@@ -482,7 +482,9 @@ export default function HomePage() {
             onUpdate={(w) => act("withdrawal", "update", w)}
             onDelete={(id) => act("withdrawal", "delete", { id })}
             onSetInactive={(p, ts) => act("partners", "set-inactive", { id: p.id, inactiveSince: ts })}
-            onReactivate={(p) => act("partners", "reactivate", { id: p.id })} />
+            onReactivate={(p) => act("partners", "reactivate", { id: p.id })}
+            onSetSettlement={(p, amount, note) => act("partners", "set-settlement", { id: p.id, amount, note })}
+            onClearSettlement={(p) => act("partners", "clear-settlement", { id: p.id })} />
         )}
         {tab === "settings" && (
           <SettingsTab menu={menu} partners={partners} deliveryZones={deliveryZones}
@@ -2579,7 +2581,40 @@ function InactiveDateForm({ partner, onConfirm, onCancel }) {
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate }) {
+function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState(partner.settlementOverride != null ? String(partner.settlementOverride) : "");
+  const [note, setNote] = useState(partner.settlementNote || "");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const confirm = async () => {
+    if (amount === "" || Number.isNaN(Number(amount))) { setError("Enter an amount."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onConfirm(Number(amount), note);
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
+  };
+
+  return (
+    <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: C.paper, border: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+        The negotiated final amount -- shown alongside the calculated balance, not instead of it, so nothing's hidden.
+      </div>
+      <input type="number" step="0.01" className="om-input" style={{ ...input, marginTop: 0 }} placeholder="e.g. 505.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+      <input className="om-input" style={{ ...input, marginTop: 8 }} placeholder="Note (optional) -- e.g. \"Agreed flat settlement\"" value={note} onChange={(e) => setNote(e.target.value)} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted, padding: "6px 10px", fontSize: 12 }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, padding: "6px 12px", fontSize: 12, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={13} /> : <Check size={13} />} Confirm
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate, onSetSettlement, onClearSettlement }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -2587,6 +2622,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editingActiveDateFor, setEditingActiveDateFor] = useState(null);
+  const [editingSettlementFor, setEditingSettlementFor] = useState(null);
   useEffect(() => { if (!partnerId && partners[0]) setPartnerId(partners[0].id); }, [partners]);
 
   const submit = async () => {
@@ -2640,8 +2676,15 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(deliveryEarnings)}</div>
                 </>
               )}
-              <div style={statLabel}>Current balance</div>
-              <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(balance)}</div>
+              <div style={statLabel}>Current balance {p.settlementOverride != null ? "(calculated)" : ""}</div>
+              <div style={{ ...displayNum, fontSize: p.settlementOverride != null ? 15 : 21, color: p.settlementOverride != null ? C.muted : C.ember, textDecoration: p.settlementOverride != null ? "line-through" : "none" }}>{money(balance)}</div>
+              {p.settlementOverride != null && (
+                <>
+                  <div style={{ ...statLabel, marginTop: 8 }}>Negotiated settlement (final)</div>
+                  <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(p.settlementOverride)}</div>
+                  {p.settlementNote && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{p.settlementNote}</div>}
+                </>
+              )}
               <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {isInactive ? (
                   <>
@@ -2651,11 +2694,22 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                 ) : (
                   <button onClick={() => setEditingActiveDateFor(editingActiveDateFor === p.id ? null : p.id)} className="om-btn" style={quickTagBtn}>Mark inactive (leaving)</button>
                 )}
+                <button onClick={() => setEditingSettlementFor(editingSettlementFor === p.id ? null : p.id)} className="om-btn" style={quickTagBtn}>
+                  {p.settlementOverride != null ? "Edit settlement" : "Override final amount"}
+                </button>
+                {p.settlementOverride != null && (
+                  <button onClick={() => onClearSettlement(p)} className="om-btn" style={{ ...quickTagBtn, borderColor: C.border, color: C.muted }}>Clear override</button>
+                )}
               </div>
               {editingActiveDateFor === p.id && (
                 <InactiveDateForm partner={p}
                   onConfirm={async (ts) => { const res = await onSetInactive(p, ts); if (res.ok) setEditingActiveDateFor(null); return res; }}
                   onCancel={() => setEditingActiveDateFor(null)} />
+              )}
+              {editingSettlementFor === p.id && (
+                <SettlementOverrideForm partner={p}
+                  onConfirm={async (amt, note) => { const res = await onSetSettlement(p, amt, note); if (res.ok) setEditingSettlementFor(null); return res; }}
+                  onCancel={() => setEditingSettlementFor(null)} />
               )}
             </div>
           );
