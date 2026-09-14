@@ -1967,7 +1967,9 @@ function PlateTotalsTab({ orders, menu }) {
     .map((c) => ({ ...c, rows: [...c.rows].sort((a, b) => b.qty - a.qty) }))
     .sort((a, b) => b.qty - a.qty);
   const totalPlates = categories.reduce((s, c) => s + c.qty, 0);
-  const totalRevenue = filtered.reduce((s, o) => s + paymentsTotal(o), 0);
+  const totalOrderValue = filtered.reduce((s, o) => s + (Number(o.total) || 0), 0);
+  const paidCollected = filtered.reduce((s, o) => s + paymentsTotal(o), 0);
+  const unpaidRemaining = Math.max(0, totalOrderValue - paidCollected);
   const topItems = categories
     .flatMap((c) => c.rows.map((r) => ({ ...r, category: c.name })))
     .sort((a, b) => b.qty - a.qty)
@@ -2011,8 +2013,12 @@ function PlateTotalsTab({ orders, menu }) {
           <div style={{ ...displayNum, fontSize: 40, color: C.moss }}>{totalPlates}</div>
         </div>
         <div style={{ ...card, flex: "1 1 200px", textAlign: "center" }}>
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Money collected — {periodLabel.toLowerCase()}</div>
-          <div style={{ ...displayNum, fontSize: 40, color: C.ember }}>{money(totalRevenue)}</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>Total order value — {periodLabel.toLowerCase()}</div>
+          <div style={{ ...displayNum, fontSize: 40, color: C.ember }}>{money(totalOrderValue)}</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 8, fontSize: 12 }}>
+            <span style={{ color: C.moss }}>Paid {money(paidCollected)}</span>
+            <span style={{ color: unpaidRemaining > 0 ? C.warning : C.muted }}>Unpaid {money(unpaidRemaining)}</span>
+          </div>
         </div>
       </div>
 
