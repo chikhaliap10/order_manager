@@ -1,6 +1,6 @@
 import { getKey, setKey, getOrInitMenu, getOrInitPartners, getOrInitDeliveryZones } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
-import { uid, defaultMenu, defaultDeliveryZones } from "../../../lib/defaults";
+import { uid, defaultMenu, defaultDeliveryZones, paymentsTotal } from "../../../lib/defaults";
 import { syncAllToSheets } from "../../../lib/sheets";
 
 export const dynamic = "force-dynamic";
@@ -87,6 +87,23 @@ export async function POST(req) {
         if (payload.payments.some((p) => !p.method)) return badRequest("Each payment needs a method.");
         const order = orders.find((o) => o.id === payload.id);
         if (!order) return badRequest("Order not found.");
+        // Guard against logging the same money twice (e.g. marking an order
+        // Paid, flipping it back to Unpaid, then logging a payment again --
+        // the first payment stays on the ledger, so the second stacks on
+        // top). A payment can't push the logged total past what's actually
+        // owed; if a customer genuinely overpaid, that goes through "Paid
+        // more than the bill?" instead, which records it deliberately.
+        const owed = Math.max(Number(order.total) || 0, Number(order.amountReceived) || 0);
+        const alreadyLogged = paymentsTotal(order);
+        const incoming = payload.payments.reduce((s, p) => s + Number(p.amount), 0);
+        if (alreadyLogged + incoming > owed + 0.01) {
+          const remaining = Math.max(0, owed - alreadyLogged);
+          return badRequest(
+            remaining <= 0.01
+              ? `This order already has $${alreadyLogged.toFixed(2)} logged against a $${owed.toFixed(2)} bill -- logging more would count the same money twice. If the customer paid extra, use "Paid more than the bill?" instead.`
+              : `Only $${remaining.toFixed(2)} is still owed on this order ($${alreadyLogged.toFixed(2)} of $${owed.toFixed(2)} already logged) -- $${incoming.toFixed(2)} would be too much.`
+          );
+        }
         orders = orders.map((o) => {
           if (o.id !== payload.id) return o;
           const existing = Array.isArray(o.payments) ? o.payments : [];
@@ -99,6 +116,21 @@ export async function POST(req) {
           // payment that closes the gap.
           const paid = o.paid || totalPaid >= Number(o.total || 0) - 0.001;
           return { ...o, payments, paid, collectedBy: paid && !o.paid ? (o.collectedBy || "") : o.collectedBy };
+        });
+      } else if (action === "remove-payment") {
+        // Removes one wrongly-logged payment record (e.g. a duplicate).
+        // Paid status is recomputed from what's left on the ledger -- a
+        // removed duplicate leaves the order Paid; removing a real payment
+        // flips it back to Unpaid with the balance showing again.
+        const order = orders.find((o) => o.id === payload.id);
+        if (!order) return badRequest("Order not found.");
+        if (!Array.isArray(order.payments) || !order.payments.some((p) => p.id === payload.paymentId)) return badRequest("Payment not found on this order.");
+        orders = orders.map((o) => {
+          if (o.id !== payload.id) return o;
+          const payments = o.payments.filter((p) => p.id !== payload.paymentId);
+          const totalPaid = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+          const paid = payments.length > 0 && totalPaid >= Number(o.total || 0) - 0.001;
+          return { ...o, payments, paid, collectedBy: paid ? o.collectedBy : "" };
         });
       } else if (action === "delete") {
         orders = orders.filter((o) => o.id !== payload.id);
@@ -132,6 +164,10 @@ export async function POST(req) {
       if (action === "create" || action === "update") {
         if (!payload?.partnerId) return badRequest("Partner is required.");
         if (!(Number(payload.amount) > 0)) return badRequest("Amount must be greater than 0.");
+        // `method` is how it was paid out (Cash/Zelle/...) -- what the
+        // Summary tab deducts it from. Optional so older records without
+        // one keep working (they're treated as Cash).
+        if (payload.method !== undefined && !["Cash", "Zelle", "Debit Card", "Credit Card"].includes(payload.method)) return badRequest("Unknown payout method.");
       }
 
       let withdrawals = await getKey("withdrawals", []);

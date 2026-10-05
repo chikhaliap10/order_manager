@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -456,12 +456,13 @@ export default function HomePage() {
           <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
+            onRemovePayment={(id, paymentId) => act("order", "remove-payment", { id, paymentId })}
             onUpdate={(order) => act("order", "update", order)}
             onDelete={(id) => act("order", "delete", { id })}
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "summary" && (
-          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} totals={totals}
+          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} withdrawals={withdrawals} totals={totals}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onAddCredit={(entry) => act("credits", "create", entry)}
             onUpdateCredit={(entry) => act("credits", "update", entry)}
@@ -764,6 +765,8 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   const [submitting, setSubmitting] = useState(false);
   const [deliveryZoneId, setDeliveryZoneId] = useState("");
   const [deliveryFeeInput, setDeliveryFeeInput] = useState("");
+  const [discountType, setDiscountType] = useState("amount"); // amount | percent
+  const [discountInput, setDiscountInput] = useState("");
   const pastCustomerNames = useMemo(() => {
     const names = new Set();
     orders.forEach((o) => { if (o.customer?.trim()) names.add(o.customer.trim()); });
@@ -803,7 +806,10 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   // as ordinary shared revenue; it just skips the personal delivery bonus
   // rather than silently crediting the wrong person.
   const deliveryDriver = partners.find((p) => p.name.trim().toLowerCase() === "prashant" && !p.inactiveSince);
-  const preTotal = subtotal + tipAmount + deliveryFee;
+  // Discount comes off the food subtotal only -- not the tip or delivery
+  // fee -- so the delivery driver's 60% cut is never affected by it.
+  const discountAmount = forPartner ? 0 : discountAmountFor(subtotal, discountType, discountInput);
+  const preTotal = subtotal - discountAmount + tipAmount + deliveryFee;
   const effectiveCustomer = forPartner ? (partners.find((p) => p.id === partnerId)?.name || "") : customer;
   const availableCredit = forPartner ? 0 : creditBalanceFor(credits, customer);
   const creditToApply = applyCredit && availableCredit > 0 ? Math.min(availableCredit, preTotal) : 0;
@@ -826,7 +832,10 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const finalTotal = itemsTotal + tipAmount + deliveryFee - creditToApply;
+    // Recomputed against the items actually being saved (blank/invalid
+    // lines are filtered out above), not the on-screen subtotal.
+    const discountSaved = forPartner ? 0 : discountAmountFor(itemsTotal, discountType, discountInput);
+    const finalTotal = itemsTotal - discountSaved + tipAmount + deliveryFee - creditToApply;
     const ts = dateStringToTs(orderDate);
     const res = await onCreate(
       forPartner
@@ -838,6 +847,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
         : {
             id: uid(), customer: customer.trim(), phone: "", items, tip: tipAmount,
             deliveryZone: deliveryLabel, deliveryFee, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
+            discount: discountSaved, discountType: discountSaved > 0 ? discountType : "", discountValue: discountSaved > 0 ? Number(discountInput) : 0,
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
     );
@@ -850,7 +860,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
       // total the same way handing cash back would.
       await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", note: "Applied to a new order" });
     }
-    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId(""); setDeliveryFeeInput("");
+    setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId(""); setDeliveryFeeInput(""); setDiscountInput(""); setDiscountType("amount");
   };
 
   return (
@@ -923,6 +933,27 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
               <>
                 <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
                 <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+                <label style={{ ...fieldLabel, marginTop: 16 }}>Discount (optional)</label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ display: "flex", gap: 0, borderRadius: 10, overflow: "hidden", border: `1px solid ${C.border}` }}>
+                    {[["amount", "$"], ["percent", "%"]].map(([id, label]) => (
+                      <button key={id} onClick={() => setDiscountType(id)} className="om-btn"
+                        style={{ padding: "8px 14px", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, background: discountType === id ? C.moss : "transparent", color: discountType === id ? "#FAF6EE" : C.muted }}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 120, marginTop: 0 }}
+                    placeholder={discountType === "percent" ? "e.g. 10" : "e.g. 5.00"} value={discountInput} onChange={(e) => setDiscountInput(e.target.value)} />
+                  {discountAmount > 0 && (
+                    <span style={{ fontSize: 13, color: C.moss }}>
+                      −{money(discountAmount)}{discountType === "percent" ? ` (${Number(discountInput)}% of ${money(subtotal)})` : ""}
+                    </span>
+                  )}
+                </div>
+                {Number(discountInput) > 0 && discountAmount === 0 && subtotal === 0 && (
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Add items first -- the discount comes off the food subtotal.</div>
+                )}
                 <label style={{ ...fieldLabel, marginTop: 16 }}>Delivery (optional)</label>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select className="om-input" style={{ ...input, width: 220, marginTop: 0 }} value={deliveryZoneId}
@@ -960,10 +991,10 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
             )}
             <ErrorText>{error}</ErrorText>
             <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-              {(tipAmount > 0 || deliveryFee > 0 || creditToApply > 0) && (
+              {(tipAmount > 0 || deliveryFee > 0 || creditToApply > 0 || discountAmount > 0) && (
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.muted, marginBottom: 6 }}>
                   <span>
-                    Subtotal {money(subtotal)}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{deliveryFee > 0 ? ` + delivery ${money(deliveryFee)}` : ""}{creditToApply > 0 ? ` − credit ${money(creditToApply)}` : ""}
+                    Subtotal {money(subtotal)}{discountAmount > 0 ? ` − discount ${money(discountAmount)}` : ""}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{deliveryFee > 0 ? ` + delivery ${money(deliveryFee)}` : ""}{creditToApply > 0 ? ` − credit ${money(creditToApply)}` : ""}
                   </span>
                 </div>
               )}
@@ -1019,7 +1050,20 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = Number(tip) || 0;
-  const total = subtotal + tipAmount;
+  // Everything in the saved total that ISN'T items, tip or discount -- the
+  // delivery fee, applied credit, and anything else baked in at creation.
+  // Worked out from what's stored (stored total minus its own items, tip
+  // and discount) rather than rebuilt from fields, so an edit that doesn't
+  // touch the items leaves the total exactly where it was. Previously the
+  // edit form recomputed the total as items + tip only, which silently
+  // dropped the delivery fee from edited delivery orders.
+  const baseItems = (order.items || []).reduce((s, i) => s + (Number(i.price) || 0) * (Number(i.qty) || 0), 0);
+  const otherAdjustments = Math.round(((Number(order.total) || 0) - (baseItems + (Number(order.tip) || 0) - (Number(order.discount) || 0))) * 100) / 100;
+  // A % discount follows the new subtotal if items change; a $ discount
+  // stays the same dollar amount (capped at the subtotal).
+  const discountFor = (sub) => (order.discountType ? discountAmountFor(sub, order.discountType, order.discountValue) : 0);
+  const discountAmount = discountFor(subtotal);
+  const total = subtotal - discountAmount + tipAmount + otherAdjustments;
   // How much is actually logged as paid on this order right now, vs. what
   // the bill comes to after this edit. If they differ and the order was
   // already marked Paid, the payments ledger would otherwise silently go
@@ -1054,7 +1098,8 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setError("");
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const newTotal = itemsTotal + tipAmount;
+    const discountSaved = discountFor(itemsTotal);
+    const newTotal = Math.round((itemsTotal - discountSaved + tipAmount + otherAdjustments) * 100) / 100;
 
     let payments = effectivePayments(order);
     let paid = order.paid;
@@ -1078,6 +1123,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
 
     const res = await onSave({
       ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: newTotal,
+      discount: discountSaved,
       payments, paid, collectedBy: paid ? collectedBy : "", ts: dateStringToTs(orderDate),
     });
     setSubmitting(false);
@@ -1137,7 +1183,7 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       )}
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
         {tipAmount > 0 && (
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)} + tip {money(tipAmount)}</div>
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)}{discountAmount > 0 ? ` − discount ${money(discountAmount)}` : ""} + tip {money(tipAmount)}{order.deliveryFee > 0 ? ` + delivery ${money(order.deliveryFee)}` : ""}{order.creditApplied > 0 ? ` − credit ${money(order.creditApplied)}` : ""}</div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
@@ -1502,6 +1548,11 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
 
   const rowsTotal = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
   const newRemaining = Math.max(0, remaining - rowsTotal);
+  // Logging more than what's still owed would count the same money twice
+  // (the usual cause: an order flipped Paid -> Unpaid keeps its logged
+  // payment, so paying it again stacks a second one on top).
+  const alreadyFullyLogged = remaining <= 0.001;
+  const overLimit = rowsTotal > remaining + 0.001;
 
   const updateRow = (i, patch) => setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const addRow = () => setRows([...rows, { method: "Zelle", amount: "", collectedBy: "" }]);
@@ -1511,6 +1562,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
     if (submittedRef.current) return;
     const cleaned = rows.filter((r) => Number(r.amount) > 0);
     if (cleaned.length === 0) { setError("Enter at least one payment amount."); return; }
+    if (alreadyFullyLogged || overLimit) return; // blocked -- message is already showing below
     submittedRef.current = true;
     setError("");
     setSubmitting(true);
@@ -1555,17 +1607,25 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
         ))}
       </div>
       <button onClick={addRow} className="om-btn" style={{ ...quickTagBtn, marginTop: 8, alignSelf: "flex-start" }}>+ Split across another method</button>
-      <div style={{ fontSize: 13, marginTop: 10, color: newRemaining > 0.001 ? C.ember : C.moss }}>
-        {newRemaining > 0.001
-          ? `${money(rowsTotal)} entered — ${money(newRemaining)} will still be owed after this`
-          : rowsTotal > remaining + 0.001
-            ? `${money(rowsTotal)} entered — this covers the full ${money(remaining)} remaining (order will be marked Paid)`
+      {alreadyFullyLogged ? (
+        <div style={{ fontSize: 13, marginTop: 10, color: C.danger }}>
+          Already fully logged: {money(alreadyPaid)} of {money(order.total)}. Logging another payment would count the same money twice. If the payment above is a mistake, remove it from the order's payment list instead.
+        </div>
+      ) : overLimit ? (
+        <div style={{ fontSize: 13, marginTop: 10, color: C.danger }}>
+          {money(rowsTotal)} is more than the {money(remaining)} still owed. Lower the amount (if the customer paid extra, use "Paid more than the bill?" after the order is Paid).
+        </div>
+      ) : (
+        <div style={{ fontSize: 13, marginTop: 10, color: newRemaining > 0.001 ? C.ember : C.moss }}>
+          {newRemaining > 0.001
+            ? `${money(rowsTotal)} entered — ${money(newRemaining)} will still be owed after this`
             : `${money(rowsTotal)} entered — covers the full remaining balance (order will be marked Paid)`}
-      </div>
+        </div>
+      )}
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
-        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+        <button onClick={confirm} disabled={submitting || alreadyFullyLogged || overLimit} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: (submitting || alreadyFullyLogged || overLimit) ? 0.5 : 1 }} className="om-btn">
           {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Log payment"}
         </button>
       </div>
@@ -1730,7 +1790,7 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCr
   );
 }
 
-function computePaymentTypeTotals(orders, credits) {
+function computePaymentTypeTotals(orders, credits, withdrawals) {
   const map = {};
   // Every logged payment counts toward the drawer, whether or not the
   // order it belongs to is fully paid yet -- a $20 cash payment on a
@@ -1749,18 +1809,26 @@ function computePaymentTypeTotals(orders, credits) {
   (credits || []).forEach((c) => {
     if (c.method) map[c.method] = (map[c.method] || 0) + (Number(c.amount) || 0); // amount is already negative
   });
+  // A partner withdrawal is money physically leaving the business, so it
+  // comes off whichever method it was paid out in. Withdrawals saved before
+  // a method was recorded have none -- those are treated as Cash, the same
+  // default every other payment uses.
+  (withdrawals || []).forEach((w) => {
+    const method = w.method || "Cash";
+    map[method] = (map[method] || 0) - (Number(w.amount) || 0);
+  });
   const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
   const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
   return [...realMethods, ...internal];
 }
 
-function PaymentTypeTotals({ orders, credits }) {
-  const rows = computePaymentTypeTotals(orders, credits);
+function PaymentTypeTotals({ orders, credits, withdrawals }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals);
   if (rows.length === 0) return null;
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Total by payment method</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment logged so far minus any reimbursements paid out, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment logged so far minus reimbursements and partner withdrawals paid out, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {rows.map((r) => (
           <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${r.internal ? C.warning : C.border}`, borderRadius: 10, padding: "10px 12px" }}>
@@ -1911,8 +1979,8 @@ function DailyBarChart({ orders }) {
 
 const METHOD_COLORS = { Cash: "#43966B", Zelle: "#F0A868", "Debit Card": "#F0C24B", "Credit Card": "#F0796B" };
 
-function MethodBarChart({ orders, credits }) {
-  const rows = computePaymentTypeTotals(orders, credits).filter((r) => !r.internal && r.total > 0);
+function MethodBarChart({ orders, credits, withdrawals }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals).filter((r) => !r.internal && r.total > 0);
   if (rows.length === 0) return null;
   const max = Math.max(...rows.map((r) => r.total), 1);
   return (
@@ -2090,17 +2158,17 @@ function PlateTotalsTab({ orders, menu }) {
   );
 }
 
-function SummaryTab({ menu, orders, partners, credits, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+function SummaryTab({ menu, orders, partners, credits, withdrawals, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   return (
     <div>
       <KpiCards orders={orders} totals={totals} />
       <DailyBarChart orders={orders} />
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-        <MethodBarChart orders={orders} credits={credits} />
+        <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} />
         <CategoryBarChart orders={orders} menu={menu} />
       </div>
       <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
-      <PaymentTypeTotals orders={orders} credits={credits} />
+      <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} menu={menu} />
       <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
@@ -2108,11 +2176,12 @@ function SummaryTab({ menu, orders, partners, credits, totals, onAddPayment, onA
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, onUpdate, onDelete, onAddCredit }) {
+function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, onRemovePayment, onUpdate, onDelete, onAddCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
   const [recordingPaymentId, setRecordingPaymentId] = useState(null);
+  const [expandedPaymentsId, setExpandedPaymentsId] = useState(null);
   const [togglingId, setTogglingId] = useState(null);
   const [returningId, setReturningId] = useState(null);
   const [search, setSearch] = useState("");
@@ -2293,6 +2362,11 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
                   <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>
                     {o.items.map((i) => `${i.qty}× ${i.name}${i.variantLabel ? " (" + i.variantLabel + ")" : ""}`).join(", ")}
                   </div>
+                  {o.discount > 0 && (
+                    <div style={{ fontSize: 12, color: C.moss, marginTop: 2 }}>
+                      🏷 Discount −{money(o.discount)}{o.discountType === "percent" ? ` (${o.discountValue}%)` : ""}
+                    </div>
+                  )}
                   {o.deliveryFee > 0 && (
                     <div style={{ fontSize: 12, color: C.ember, marginTop: 2 }}>
                       🚗 {o.deliveryZone || "Delivery"} — {money(o.deliveryFee)}{o.deliveryDriverId ? ` (${partnerName(o.deliveryDriverId) || "Unknown"}'s delivery)` : ""}
@@ -2363,6 +2437,31 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
                       <button onClick={() => setRecordingPaymentId(o.id)} className="om-btn" style={quickTagBtn}>
                         {paymentsTotal(o) > 0 ? "Log another payment" : "Log a payment (partial or split)"}
                       </button>
+                    </div>
+                  )}
+                  {Array.isArray(o.payments) && o.payments.length > 0 && (
+                    <div style={{ marginTop: 6 }}>
+                      <button onClick={() => setExpandedPaymentsId(expandedPaymentsId === o.id ? null : o.id)} className="om-btn"
+                        style={{ ...quickTagBtn, borderColor: C.border, color: C.muted }}>
+                        {expandedPaymentsId === o.id ? "Hide" : "View"} logged payments ({o.payments.length})
+                      </button>
+                      {expandedPaymentsId === o.id && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
+                          {o.payments.map((p) => (
+                            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, background: C.paper, borderRadius: 8, padding: "6px 10px", fontSize: 13 }}>
+                              <span style={{ flex: 1 }}>
+                                {p.method} <span style={{ ...displayNum, fontSize: 13 }}>{money(p.amount)}</span>
+                                <span style={{ color: C.muted, fontSize: 11 }}> · logged {p.ts ? tsToDateString(p.ts) : "—"}</span>
+                                {p.collectedBy ? <span style={{ color: C.ember, fontSize: 11 }}> · received by {partnerName(p.collectedBy) || "Unknown"}</span> : null}
+                              </span>
+                              <ConfirmDelete label="payment" onConfirm={() => onRemovePayment(o.id, p.id)} />
+                            </div>
+                          ))}
+                          <div style={{ fontSize: 11, color: C.muted }}>
+                            Removing a payment only fixes the record -- use it to delete a duplicate, not to refund a customer.
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2532,6 +2631,7 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
   const [partnerId, setPartnerId] = useState(withdrawal.partnerId);
   const [amount, setAmount] = useState(String(withdrawal.amount));
   const [note, setNote] = useState(withdrawal.note || "");
+  const [method, setMethod] = useState(withdrawal.method || "Cash");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -2540,7 +2640,7 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...withdrawal, partnerId, amount: Number(amount), note });
+    const res = await onSave({ ...withdrawal, partnerId, amount: Number(amount), method, note });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -2558,6 +2658,12 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
         <div style={{ width: 130 }}>
           <label style={fieldLabel}>Amount</label>
           <input type="number" step="0.01" min="0.01" className="om-input" style={input} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+        </div>
+        <div style={{ width: 150 }}>
+          <label style={fieldLabel}>Paid out as</label>
+          <select className="om-input" style={input} value={method} onChange={(e) => setMethod(e.target.value)}>
+            {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
         </div>
       </div>
       <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
@@ -2646,6 +2752,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
   const [editingId, setEditingId] = useState(null);
   const [editingActiveDateFor, setEditingActiveDateFor] = useState(null);
   const [editingSettlementFor, setEditingSettlementFor] = useState(null);
+  const [withdrawMethod, setWithdrawMethod] = useState("Cash");
   useEffect(() => { if (!partnerId && partners[0]) setPartnerId(partners[0].id); }, [partners]);
 
   const submit = async () => {
@@ -2653,7 +2760,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onCreate({ id: uid(), partnerId, amount: Number(amount), note, ts: Date.now() });
+    const res = await onCreate({ id: uid(), partnerId, amount: Number(amount), method: withdrawMethod, note, ts: Date.now() });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
     setAmount(""); setNote("");
@@ -2755,7 +2862,14 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
             <label style={fieldLabel}>Amount</label>
             <input type="number" step="0.01" min="0.01" className="om-input" style={input} placeholder="$0.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
           </div>
+          <div style={{ width: 150 }}>
+            <label style={fieldLabel}>Paid out as</label>
+            <select className="om-input" style={input} value={withdrawMethod} onChange={(e) => setWithdrawMethod(e.target.value)}>
+              {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
         </div>
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>This amount comes off the {withdrawMethod} total on the Summary tab.</div>
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Rent for June" value={note} onChange={(e) => setNote(e.target.value)} />
         <ErrorText>{error}</ErrorText>
@@ -2777,7 +2891,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
             ) : (
               <div key={w.id} style={{ ...rowCard, borderLeft: `3px solid ${C.ember}` }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 15 }}>{partners.find((p) => p.id === w.partnerId)?.name || "Unknown"}</div>
+                  <div style={{ fontWeight: 600, fontSize: 15 }}>{partners.find((p) => p.id === w.partnerId)?.name || "Unknown"} <span style={{ fontWeight: 400, fontSize: 12, color: C.muted }}>· {w.method || "Cash"}</span></div>
                   {w.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{w.note}</div>}
                 </div>
                 <div style={{ ...displayNum, fontSize: 15, marginRight: 14 }}>{money(w.amount)}</div>
