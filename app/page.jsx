@@ -25,6 +25,19 @@ function tsToDateString(ts) {
 function todayDateString() {
   return tsToDateString(Date.now());
 }
+// Midnight at the START of a "YYYY-MM-DD" day. Used for a new partner's
+// start date so every order and expense dated that day -- whatever time it
+// was logged -- counts with them (dateStringToTs is local noon, which would
+// leave out anything logged earlier that morning).
+function startOfDayTs(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0).getTime();
+}
+// Can this partner be picked for something new right now? Not if they've
+// left, and not if their start date hasn't arrived yet.
+function isActiveNow(p) {
+  return !p.inactiveSince && (!p.activeFrom || p.activeFrom <= Date.now());
+}
 // Filters orders to a plate-totals reporting period. "today"/"month" use
 // calendar-day/calendar-month comparisons (via tsToDateString, consistent
 // with the rest of the app's date handling) rather than raw millisecond
@@ -281,7 +294,11 @@ export default function HomePage() {
     // earned up to that point; the partners who remain simply get a
     // bigger slice of profit generated after that, without any
     // retroactive recalculation of history.
-    const activePartnersAt = (ts) => partners.filter((p) => !p.inactiveSince || (ts || 0) < p.inactiveSince);
+    // Active at a date = already started by then (activeFrom) and not yet
+    // left (inactiveSince). Partners with neither field -- everyone who
+    // existed before this feature -- count for all of history, as before.
+    const activePartnersAt = (ts) => partners.filter((p) =>
+      (!p.activeFrom || (ts || 0) >= p.activeFrom) && (!p.inactiveSince || (ts || 0) < p.inactiveSince));
     const perPartnerShare = {};
     partners.forEach((p) => { perPartnerShare[p.id] = 0; });
     visibleOrders.forEach((o) => {
@@ -299,10 +316,17 @@ export default function HomePage() {
     expenses.forEach((e) => {
       const amt = Number(e.amount) || 0;
       if (amt === 0) return;
-      const activeAt = activePartnersAt(e.ts);
-      if (activeAt.length === 0) return;
-      const per = amt / activeAt.length;
-      activeAt.forEach((p) => { perPartnerShare[p.id] -= per; });
+      // An expense can name exactly who shares its cost (sharedBy) --
+      // for when the automatic "everyone active on that date" isn't right,
+      // e.g. a cost that belongs to the new partner but not the one who
+      // just left, or the other way round. Otherwise it's automatic.
+      const named = Array.isArray(e.sharedBy) && e.sharedBy.length > 0
+        ? partners.filter((p) => e.sharedBy.includes(p.id))
+        : null;
+      const sharers = named && named.length > 0 ? named : activePartnersAt(e.ts);
+      if (sharers.length === 0) return;
+      const per = amt / sharers.length;
+      sharers.forEach((p) => { perPartnerShare[p.id] -= per; });
     });
     // Still exposed as a flat number for anywhere that wants a rough
     // "typical" share (e.g. an average across everyone) -- but each
@@ -485,7 +509,8 @@ export default function HomePage() {
             onSetInactive={(p, ts) => act("partners", "set-inactive", { id: p.id, inactiveSince: ts })}
             onReactivate={(p) => act("partners", "reactivate", { id: p.id })}
             onSetSettlement={(p, amount, note) => act("partners", "set-settlement", { id: p.id, amount, note })}
-            onClearSettlement={(p) => act("partners", "clear-settlement", { id: p.id })} />
+            onClearSettlement={(p) => act("partners", "clear-settlement", { id: p.id })}
+            onAddPartner={(name, activeFrom) => act("partners", "add", { name, activeFrom })} />
         )}
         {tab === "settings" && (
           <SettingsTab menu={menu} partners={partners} deliveryZones={deliveryZones}
@@ -805,7 +830,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   // partner named "Prashant" exists (e.g. renamed), the fee still counts
   // as ordinary shared revenue; it just skips the personal delivery bonus
   // rather than silently crediting the wrong person.
-  const deliveryDriver = partners.find((p) => p.name.trim().toLowerCase() === "prashant" && !p.inactiveSince);
+  const deliveryDriver = partners.find((p) => p.name.trim().toLowerCase() === "prashant" && isActiveNow(p));
   // Discount comes off the food subtotal only -- not the tip or delivery
   // fee -- so the delivery driver's 60% cut is never affected by it.
   const discountAmount = forPartner ? 0 : discountAmountFor(subtotal, discountType, discountInput);
@@ -882,7 +907,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
               <>
                 <label style={fieldLabel}>Which partner?</label>
                 <select className="om-input" style={input} value={partnerId} onChange={(e) => setPartnerId(e.target.value)}>
-                  {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
                 <label style={{ ...fieldLabel, marginTop: 12 }}>How is this being settled?</label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -1221,7 +1246,7 @@ function CollectorPicker({ order, partners, onConfirm, onCancel }) {
       <label style={fieldLabel}>Who collected this payment?</label>
       <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
         <option value="">Shared account</option>
-        {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
@@ -1597,7 +1622,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
               <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
                 value={r.collectedBy} onChange={(e) => updateRow(i, { collectedBy: e.target.value })}>
                 <option value="">Zelle → shared account</option>
-                {partners.filter((p) => !p.inactiveSince).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
+                {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
               </select>
             )}
             {rows.length > 1 && (
@@ -2483,11 +2508,52 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
   );
 }
 
+// Who bears an expense's cost. "Automatic" splits it among whoever was an
+// active partner on the expense's date. "Specific partners" overrides that
+// -- tick exactly who shares it -- for the cases the automatic rule can't
+// get right: a cost that should hit the new partner but not the one who
+// just left, or the reverse. `value` is the list of partner ids; an empty
+// list means automatic.
+function ExpenseSharePicker({ partners, value, onChange }) {
+  const custom = value.length > 0;
+  const [mode, setMode] = useState(custom ? "custom" : "auto");
+  const toggle = (id) => onChange(value.includes(id) ? value.filter((x) => x !== id) : [...value, id]);
+  const pill = (active) => ({ padding: "7px 12px", fontSize: 13, borderRadius: 10, cursor: "pointer", background: active ? C.moss : "transparent", color: active ? "#FAF6EE" : C.muted, border: `1px solid ${active ? C.moss : C.border}` });
+  return (
+    <div>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Who shares this cost?</label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button type="button" className="om-btn" style={pill(mode === "auto")} onClick={() => { setMode("auto"); onChange([]); }}>Everyone active that day</button>
+        <button type="button" className="om-btn" style={pill(mode === "custom")} onClick={() => setMode("custom")}>Only specific partners</button>
+      </div>
+      {mode === "custom" && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          {partners.map((p) => {
+            const on = value.includes(p.id);
+            return (
+              <button type="button" key={p.id} className="om-btn" onClick={() => toggle(p.id)}
+                style={{ padding: "6px 12px", fontSize: 13, borderRadius: 999, cursor: "pointer", background: on ? C.mossTint : "transparent", color: on ? C.mossDark : C.muted, border: `1px solid ${on ? C.moss : C.border}` }}>
+                {on ? "✓ " : ""}{p.name}{p.inactiveSince ? " (left)" : ""}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+        {mode === "custom"
+          ? (value.length === 0 ? "Tick at least one partner, or switch back to automatic." : `Split equally between ${value.length} partner${value.length === 1 ? "" : "s"}.`)
+          : "Automatic: split among everyone who was a partner on the date this was logged."}
+      </div>
+    </div>
+  );
+}
+
 function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
   const [category, setCategory] = useState(expense.category);
   const [amount, setAmount] = useState(String(expense.amount));
   const [note, setNote] = useState(expense.note || "");
   const [paidBy, setPaidBy] = useState(expense.paidBy || "");
+  const [sharedBy, setSharedBy] = useState(Array.isArray(expense.sharedBy) ? expense.sharedBy : []);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -2496,7 +2562,7 @@ function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...expense, category, amount: Number(amount), note, paidBy });
+    const res = await onSave({ ...expense, category, amount: Number(amount), note, paidBy, sharedBy });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -2523,6 +2589,7 @@ function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
       </select>
       <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
       <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
+      <ExpenseSharePicker partners={partners} value={sharedBy} onChange={setSharedBy} />
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
@@ -2539,6 +2606,8 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
   const [category, setCategory] = useState("Ingredients");
   const [note, setNote] = useState("");
   const [paidBy, setPaidBy] = useState("");
+  const [sharedBy, setSharedBy] = useState([]);
+  const [shareKey, setShareKey] = useState(0); // remounts the picker after a save so it resets to automatic
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -2548,10 +2617,10 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, paidBy, ts: Date.now() });
+    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, paidBy, sharedBy, ts: Date.now() });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    setAmount(""); setNote(""); setPaidBy("");
+    setAmount(""); setNote(""); setPaidBy(""); setSharedBy([]); setShareKey((k) => k + 1);
   };
 
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
@@ -2585,6 +2654,7 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
         </select>
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Sunday market veggie run" value={note} onChange={(e) => setNote(e.target.value)} />
+        <ExpenseSharePicker key={shareKey} partners={partners} value={sharedBy} onChange={setSharedBy} />
         <ErrorText>{error}</ErrorText>
         <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, opacity: submitting ? 0.7 : 1 }} className="om-btn">
           {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} {submitting ? "Saving..." : "Add expense"}
@@ -2605,6 +2675,9 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, fontSize: 15 }}>{e.category}</div>
                   {e.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{e.note}</div>}
+                  {Array.isArray(e.sharedBy) && e.sharedBy.length > 0 && (
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>Split between: {e.sharedBy.map((id) => partnerName(id) || "Unknown").join(", ")}</div>
+                  )}
                   {e.paidBy && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 12, color: C.ember }}>Paid by {partnerName(e.paidBy) || "Unknown"}</span>
@@ -2679,6 +2752,47 @@ function WithdrawalEditForm({ withdrawal, partners, onSave, onCancel }) {
   );
 }
 
+function AddPartnerForm({ onAdd }) {
+  const [name, setName] = useState("");
+  const [date, setDate] = useState(todayDateString());
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (!name.trim()) { setError("Enter the partner's name."); return; }
+    if (!date) { setError("Pick the date they start sharing profit."); return; }
+    setError("");
+    setSubmitting(true);
+    const res = await onAdd(name.trim(), startOfDayTs(date));
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); return; }
+    setName(""); setDate(todayDateString());
+  };
+
+  return (
+    <div style={{ ...card, marginBottom: 26 }}>
+      <div style={cardTitle}>Add a partner</div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ flex: 2, minWidth: 160 }}>
+          <label style={fieldLabel}>Name</label>
+          <input className="om-input" style={{ ...input, marginTop: 0 }} placeholder="e.g. Pal" value={name} onChange={(e) => { setName(e.target.value); setError(""); }} />
+        </div>
+        <div style={{ flex: 1, minWidth: 150 }}>
+          <label style={fieldLabel}>Starts sharing profit on</label>
+          <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={date} onChange={(e) => { setDate(e.target.value); setError(""); }} />
+        </div>
+        <button onClick={submit} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Plus size={15} />} Add partner
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>
+        They only share orders and expenses dated on or after this day -- nobody's past numbers change. Any expense can still be assigned to specific partners from the Expenses tab.
+      </div>
+      <ErrorText>{error}</ErrorText>
+    </div>
+  );
+}
+
 function InactiveDateForm({ partner, onConfirm, onCancel }) {
   const [date, setDate] = useState(partner.inactiveSince ? tsToDateString(partner.inactiveSince) : todayDateString());
   const [error, setError] = useState("");
@@ -2743,7 +2857,7 @@ function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate, onSetSettlement, onClearSettlement }) {
+function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate, onSetSettlement, onClearSettlement, onAddPartner }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -2768,6 +2882,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
 
   return (
     <div>
+      <AddPartnerForm onAdd={onAddPartner} />
       <div style={sectionTitle}>Live balance per partner</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px,1fr))", gap: 12, marginBottom: 26 }}>
         {partners.map((p) => {
@@ -2782,7 +2897,11 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <div style={{ fontWeight: 600, fontSize: 15 }}>{p.name}</div>
-                {isInactive && <span style={{ fontSize: 11, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "2px 8px" }}>Inactive since {tsToDateString(p.inactiveSince)}</span>}
+                {isInactive
+                  ? <span style={{ fontSize: 11, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "2px 8px" }}>Inactive since {tsToDateString(p.inactiveSince)}</span>
+                  : p.activeFrom
+                    ? <span style={{ fontSize: 11, color: C.mossDark, border: `1px solid ${C.moss}`, borderRadius: 999, padding: "2px 8px" }}>{p.activeFrom > Date.now() ? "Starts" : "Joined"} {tsToDateString(p.activeFrom)}</span>
+                    : null}
               </div>
               <div style={statLabel}>Their share {isInactive ? "(frozen as of leaving)" : "(profit earned while active)"}</div>
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(myShare)}</div>

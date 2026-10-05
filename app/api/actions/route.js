@@ -219,10 +219,20 @@ export async function POST(req) {
 
     // ---------- PARTNERS ----------
     if (resource === "partners") {
-      if (action === "rename" && !payload?.name?.trim()) return badRequest("Partner name cannot be empty.");
+      if ((action === "rename" || action === "add") && !payload?.name?.trim()) return badRequest("Partner name cannot be empty.");
 
       let partners = await getOrInitPartners();
-      if (action === "rename") {
+      if (action === "add") {
+        // A new partner starts sharing profit from `activeFrom` (a ms
+        // timestamp at the start of their first day), NOT from the
+        // beginning of history -- the split only counts them for orders and
+        // expenses dated on/after it, so everyone's past shares stay put.
+        const activeFrom = Number(payload.activeFrom) || Date.now();
+        if (partners.some((p) => p.name.trim().toLowerCase() === payload.name.trim().toLowerCase())) {
+          return badRequest("A partner with that name already exists.");
+        }
+        partners = [...partners, { id: uid(), name: payload.name.trim(), activeFrom }];
+      } else if (action === "rename") {
         partners = partners.map((p) => (p.id === payload.id ? { ...p, name: payload.name.trim() } : p));
       } else if (action === "set-inactive") {
         // Freezes this partner out of future profit splits as of a
