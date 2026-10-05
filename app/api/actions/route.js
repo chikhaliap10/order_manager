@@ -144,6 +144,8 @@ export async function POST(req) {
       if (action === "create" || action === "update") {
         if (!payload?.category?.trim()) return badRequest("Category is required.");
         if (!(Number(payload.amount) > 0)) return badRequest("Amount must be greater than 0.");
+        // paidWith = which total a shared-account expense comes off ("" = none).
+        if (payload.paidWith && !["Cash", "Zelle", "Debit Card", "Credit Card"].includes(payload.paidWith)) return badRequest("Unknown payment method.");
       }
 
       let expenses = await getKey("expenses", []);

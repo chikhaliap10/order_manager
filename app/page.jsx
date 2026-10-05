@@ -486,7 +486,7 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "summary" && (
-          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} withdrawals={withdrawals} totals={totals}
+          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} withdrawals={withdrawals} expenses={expenses} totals={totals}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onAddCredit={(entry) => act("credits", "create", entry)}
             onUpdateCredit={(entry) => act("credits", "update", entry)}
@@ -1815,7 +1815,7 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCr
   );
 }
 
-function computePaymentTypeTotals(orders, credits, withdrawals) {
+function computePaymentTypeTotals(orders, credits, withdrawals, expenses) {
   const map = {};
   // Every logged payment counts toward the drawer, whether or not the
   // order it belongs to is fully paid yet -- a $20 cash payment on a
@@ -1842,18 +1842,30 @@ function computePaymentTypeTotals(orders, credits, withdrawals) {
     const method = w.method || "Cash";
     map[method] = (map[method] || 0) - (Number(w.amount) || 0);
   });
+  // An expense paid from the shared account is money leaving the business,
+  // so it comes off whichever method it was paid with. Deliberately only
+  // expenses that SAY how they were paid (paidWith) count: older expenses
+  // have no method recorded and may well have been paid some other way
+  // entirely, so deducting them all as Cash would swing the total by
+  // hundreds of dollars on a guess. Expenses a partner paid out of their
+  // own pocket never come off the business totals -- that's their money,
+  // handled through their balance instead.
+  (expenses || []).forEach((e) => {
+    if (e.paidBy || !e.paidWith) return;
+    map[e.paidWith] = (map[e.paidWith] || 0) - (Number(e.amount) || 0);
+  });
   const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
   const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
   return [...realMethods, ...internal];
 }
 
-function PaymentTypeTotals({ orders, credits, withdrawals }) {
-  const rows = computePaymentTypeTotals(orders, credits, withdrawals);
+function PaymentTypeTotals({ orders, credits, withdrawals, expenses }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses);
   if (rows.length === 0) return null;
   return (
     <div style={{ ...card, marginBottom: 18 }}>
       <div style={cardTitle}>Total by payment method</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment logged so far minus reimbursements and partner withdrawals paid out, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>Every payment logged so far minus reimbursements, partner withdrawals and shared-account expenses paid out, including partial payments on still-open orders — this is what you should physically have in cash/Zelle/cards, excluding internal partner-meal deductions below</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
         {rows.map((r) => (
           <div key={r.method} style={{ flex: "1 1 130px", background: C.card, border: `1px solid ${r.internal ? C.warning : C.border}`, borderRadius: 10, padding: "10px 12px" }}>
@@ -2004,8 +2016,8 @@ function DailyBarChart({ orders }) {
 
 const METHOD_COLORS = { Cash: "#43966B", Zelle: "#F0A868", "Debit Card": "#F0C24B", "Credit Card": "#F0796B" };
 
-function MethodBarChart({ orders, credits, withdrawals }) {
-  const rows = computePaymentTypeTotals(orders, credits, withdrawals).filter((r) => !r.internal && r.total > 0);
+function MethodBarChart({ orders, credits, withdrawals, expenses }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses).filter((r) => !r.internal && r.total > 0);
   if (rows.length === 0) return null;
   const max = Math.max(...rows.map((r) => r.total), 1);
   return (
@@ -2183,17 +2195,17 @@ function PlateTotalsTab({ orders, menu }) {
   );
 }
 
-function SummaryTab({ menu, orders, partners, credits, withdrawals, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   return (
     <div>
       <KpiCards orders={orders} totals={totals} />
       <DailyBarChart orders={orders} />
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-        <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} />
+        <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
         <CategoryBarChart orders={orders} menu={menu} />
       </div>
       <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
-      <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} />
+      <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} menu={menu} />
       <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
@@ -2508,6 +2520,24 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
   );
 }
 
+// How a shared-account expense was paid -- decides which total it comes off
+// on the Summary tab. "" means "don't deduct from any total" (e.g. paid from
+// a bank card that isn't one of the tracked totals, or an older expense).
+function PaidFromSelect({ value, onChange }) {
+  return (
+    <div>
+      <label style={{ ...fieldLabel, marginTop: 12 }}>Paid from</label>
+      <select className="om-input" style={input} value={value} onChange={(e) => onChange(e.target.value)}>
+        {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+        <option value="">Not deducted from any total</option>
+      </select>
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+        {value ? `This comes off the ${value} total on the Summary tab.` : "This expense won't change any total on the Summary tab."}
+      </div>
+    </div>
+  );
+}
+
 // Who bears an expense's cost. "Automatic" splits it among whoever was an
 // active partner on the expense's date. "Specific partners" overrides that
 // -- tick exactly who shares it -- for the cases the automatic rule can't
@@ -2554,6 +2584,9 @@ function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
   const [note, setNote] = useState(expense.note || "");
   const [paidBy, setPaidBy] = useState(expense.paidBy || "");
   const [sharedBy, setSharedBy] = useState(Array.isArray(expense.sharedBy) ? expense.sharedBy : []);
+  // Older expenses have no method recorded -- they open as "not deducted" so
+  // that saving an edit never silently starts changing a total.
+  const [paidWith, setPaidWith] = useState(expense.paidWith || "");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -2562,7 +2595,7 @@ function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onSave({ ...expense, category, amount: Number(amount), note, paidBy, sharedBy });
+    const res = await onSave({ ...expense, category, amount: Number(amount), note, paidBy, paidWith: paidBy === "" ? paidWith : "", sharedBy });
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -2587,6 +2620,7 @@ function ExpenseEditForm({ expense, partners, onSave, onCancel }) {
         <option value="">Shared account</option>
         {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
+      {paidBy === "" && <PaidFromSelect value={paidWith} onChange={setPaidWith} />}
       <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
       <input className="om-input" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
       <ExpenseSharePicker partners={partners} value={sharedBy} onChange={setSharedBy} />
@@ -2607,6 +2641,7 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
   const [note, setNote] = useState("");
   const [paidBy, setPaidBy] = useState("");
   const [sharedBy, setSharedBy] = useState([]);
+  const [paidWith, setPaidWith] = useState("Cash");
   const [shareKey, setShareKey] = useState(0); // remounts the picker after a save so it resets to automatic
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -2617,10 +2652,12 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
     if (!amount || Number(amount) <= 0) { setError("Amount must be greater than 0."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, paidBy, sharedBy, ts: Date.now() });
+    // Only a shared-account expense has a "paid from" -- one a partner paid
+    // personally isn't business money leaving, so it records none.
+    const res = await onCreate({ id: uid(), amount: Number(amount), category, note, paidBy, paidWith: paidBy === "" ? paidWith : "", sharedBy, ts: Date.now() });
     setSubmitting(false);
     if (!res.ok) { setError(res.error); return; }
-    setAmount(""); setNote(""); setPaidBy(""); setSharedBy([]); setShareKey((k) => k + 1);
+    setAmount(""); setNote(""); setPaidBy(""); setSharedBy([]); setPaidWith("Cash"); setShareKey((k) => k + 1);
   };
 
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
@@ -2652,6 +2689,7 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
           <option value="">Shared account</option>
           {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
+        {paidBy === "" && <PaidFromSelect value={paidWith} onChange={setPaidWith} />}
         <label style={{ ...fieldLabel, marginTop: 12 }}>Note (optional)</label>
         <input className="om-input" style={input} placeholder="e.g. Sunday market veggie run" value={note} onChange={(e) => setNote(e.target.value)} />
         <ExpenseSharePicker key={shareKey} partners={partners} value={sharedBy} onChange={setSharedBy} />
@@ -2675,6 +2713,9 @@ function ExpensesTab({ expenses, partners, onCreate, onUpdate, onDelete }) {
                 <div style={{ flex: 1 }}>
                   <div style={{ fontWeight: 600, fontSize: 15 }}>{e.category}</div>
                   {e.note && <div style={{ fontSize: 13, color: C.muted, marginTop: 2 }}>{e.note}</div>}
+                  {!e.paidBy && e.paidWith && (
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>Paid from {e.paidWith} (comes off that total)</div>
+                  )}
                   {Array.isArray(e.sharedBy) && e.sharedBy.length > 0 && (
                     <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>Split between: {e.sharedBy.map((id) => partnerName(id) || "Unknown").join(", ")}</div>
                   )}
