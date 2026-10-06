@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -1142,7 +1142,7 @@ function orderToLines(order, menu) {
   });
 }
 
-function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel }) {
+function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onAddCredit, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
   const [phone, setPhone] = useState(order.phone || "");
   const [lines, setLines] = useState(orderToLines(order, menu));
@@ -1153,6 +1153,10 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel 
   const [submitting, setSubmitting] = useState(false);
   const [extraMethod, setExtraMethod] = useState("Cash");
   const [extraAmountOverride, setExtraAmountOverride] = useState(null); // null = still tracking the live diff automatically
+  // When a bill that's already Paid goes DOWN, the customer has paid more than
+  // it now costs. Either that extra was handed back ("refund": taken off the
+  // payments) or the customer is keeping it as credit with us ("credit").
+  const [lowerBillChoice, setLowerBillChoice] = useState("refund");
   // Delivery starts out as whatever the order already has: none, one of the
   // zones, Uber Courier, or "custom" (a typed fee / a zone since removed).
   const [deliveryZoneId, setDeliveryZoneId] = useState(() => {
@@ -1233,6 +1237,7 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel 
 
     let payments = effectivePayments(order);
     let paid = order.paid;
+    let keepAsCredit = null;
     if (order.paid) {
       const gap = newTotal - alreadyLogged;
       if (gap > 0.001) {
@@ -1245,8 +1250,17 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel 
         const newSum = payments.reduce((s, p) => s + (Number(p.amount) || 0), 0);
         paid = newSum >= newTotal - 0.001; // stays Paid only if the gap was fully covered
       } else if (gap < -0.001) {
-        // Bill went down -- trim the ledger to match, most-recent first.
-        payments = trimPayments(payments, -gap);
+        if (lowerBillChoice === "credit") {
+          // The customer keeps the extra as credit with us: the payments stay exactly
+          // as logged (that money really is in the drawer), the order records how much
+          // was received, and the same credit entry "Paid more than the bill?" would
+          // make is created -- only for the part that's new from THIS edit, so any
+          // overpayment already recorded isn't counted twice.
+          keepAsCredit = creditFromLoweredBill({ order, newTotal, alreadyLogged });
+        } else {
+          // Refunded -- trim the ledger to match, most-recent first.
+          payments = trimPayments(payments, -gap);
+        }
         paid = true; // a lower bill that was already fully paid is still fully paid
       }
     }
@@ -1258,8 +1272,12 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel 
         deliveryZone: feeSaved > 0 ? zoneSaved : "", deliveryFee: feeSaved,
         deliveryCutRate: feeSaved > 0 ? (isUberSave ? 1 : DRIVER_CUT_RATE) : 0, deliveryDriverId: driverSaved,
       }),
+      ...(keepAsCredit ? { amountReceived: keepAsCredit.amountReceived } : {}),
       payments, paid, collectedBy: paid ? collectedBy : "", ts: dateStringToTs(orderDate),
     });
+    if (res && res.ok && keepAsCredit && keepAsCredit.extra > 0.005 && onAddCredit) {
+      await onAddCredit({ customer: customer.trim(), amount: keepAsCredit.extra, note: `Overpayment on order for ${customer.trim()}` });
+    }
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -1350,9 +1368,18 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel 
       )}
       {order.paid && diff < -0.001 && (
         <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.warningTint, border: `1px solid ${C.warning}44` }}>
-          <div style={{ fontSize: 13, color: C.warning, fontWeight: 600 }}>
-            This removes {money(-diff)} from a bill already marked Paid — that amount will be taken off the most recently logged payment(s), as if refunded. If the customer is keeping it as credit instead, save, then use "Paid more than the bill?" on the order.
+          <div style={{ fontSize: 13, color: C.warning, fontWeight: 600, marginBottom: 8 }}>
+            This lowers a bill that's already marked Paid by {money(-diff)}. What happens to that {money(-diff)}?
           </div>
+          {[
+            ["refund", "Refund it", "Take it off the payments, as if you gave it back to them."],
+            ["credit", `Keep it as credit for ${customer.trim() || "this customer"}`, "They paid it and you owe it to them. The payment stays as logged, and it shows under Customer credits to use on a later order or Reimburse."],
+          ].map(([value, title, hint]) => (
+            <label key={value} style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer", marginTop: 6 }}>
+              <input type="radio" name="lowerBillChoice" checked={lowerBillChoice === value} onChange={() => setLowerBillChoice(value)} style={{ marginTop: 3 }} />
+              <span style={{ fontSize: 13 }}><b>{title}</b><span style={{ display: "block", fontSize: 12, color: C.muted }}>{hint}</span></span>
+            </label>
+          ))}
         </div>
       )}
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
@@ -2524,7 +2551,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, onTogglePaid, 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filteredOrders.map((o) =>
             editingId === o.id ? (
-              <OrderEditForm key={o.id} order={o} menu={menu} partners={partners} deliveryZones={deliveryZones}
+              <OrderEditForm key={o.id} order={o} menu={menu} partners={partners} deliveryZones={deliveryZones} onAddCredit={onAddCredit}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
             ) : pickingCollectorId === o.id ? (
