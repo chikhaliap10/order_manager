@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -262,7 +262,8 @@ export default function HomePage() {
     // away, and only the true remaining balance counts as pending.
     const income = visibleOrders.reduce((s, o) => s + paymentsTotal(o), 0);
     const pending = visibleOrders.reduce((s, o) => s + Math.max(0, (Number(o.total) || 0) - paymentsTotal(o)), 0);
-    // A delivery fee's driver cut (60%) goes straight to whoever delivered
+    // A delivery fee's driver cut (60%, or the whole fee for an Uber Courier
+    // delivery) goes straight to whoever delivered
     // it -- undiluted, never split with other partners, and deliberately
     // NOT modeled as an expense (an expense would get divided by
     // partners.length before being credited back, shrinking their cut).
@@ -280,7 +281,7 @@ export default function HomePage() {
       const paid = paymentsTotal(o);
       const total = Number(o.total) || 0;
       const collectedShare = total > 0.005 ? Math.min(1, paid / total) : 1;
-      return Math.min(Number(o.deliveryFee) * 0.6 * collectedShare, Math.max(0, paid));
+      return Math.min(Number(o.deliveryFee) * driverCutRate(o) * collectedShare, Math.max(0, paid));
     };
     const deliveryEarningsByPartner = {};
     let totalDeliveryDriverEarnings = 0;
@@ -299,6 +300,14 @@ export default function HomePage() {
     // already shrank by the same amount, so it corrects itself.
     const reimbursements = (credits || []).filter((c) => isReimbursement(c) && Number(c.amount) < 0);
     const totalReimbursed = reimbursements.reduce((s, c) => s - Number(c.amount), 0);
+    // A refund a partner paid out of their OWN money (e.g. from Zelle they
+    // personally hold) is still a cost shared by everyone -- it's in
+    // totalReimbursed like any other -- but the partner who handed the money
+    // over is credited back for it, since they're holding that much less (or
+    // fronted it). It's the same bookkeeping as an expense a partner paid
+    // personally.
+    const refundsPaidByPartner = {};
+    reimbursements.forEach((c) => { if (c.paidBy) refundsPaidByPartner[c.paidBy] = (refundsPaidByPartner[c.paidBy] || 0) - Number(c.amount); });
     const netProfit = income - expenseTotal - totalDeliveryDriverEarnings - totalReimbursed;
     // A partner who was active for only part of history shouldn't have
     // that reshuffle everyone else's past shares -- so profit isn't just
@@ -388,13 +397,13 @@ export default function HomePage() {
     const baseBalance = {};
     partners.forEach((p) => {
       baseBalance[p.id] = (perPartnerShare[p.id] || 0) - (withdrawnByPartner[p.id] || 0) - (collectedByPartner[p.id] || 0)
-        + (paidExpensesByPartner[p.id] || 0) + (deliveryEarningsByPartner[p.id] || 0);
+        + (paidExpensesByPartner[p.id] || 0) + (deliveryEarningsByPartner[p.id] || 0) + (refundsPaidByPartner[p.id] || 0);
     });
     const { adjustmentByPartner: settlementAdjustmentByPartner, infoByPartner: settlementInfo } =
       computeSettlementAdjustments(partners, baseBalance, withdrawals);
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
-    return { income, pending, expenseTotal, netProfit, totalReimbursed, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, settlementAdjustmentByPartner, settlementInfo, expensePercent, profitPercent };
+    return { income, pending, expenseTotal, netProfit, totalReimbursed, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, refundsPaidByPartner, settlementAdjustmentByPartner, settlementInfo, expensePercent, profitPercent };
   }, [visibleOrders, expenses, withdrawals, partners, credits]);
 
   const GlobalStyle = () => (
@@ -508,7 +517,7 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners}
+          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} deliveryZones={deliveryZones}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onRemovePayment={(id, paymentId) => act("order", "remove-payment", { id, paymentId })}
@@ -850,18 +859,21 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   const tipAmount = forPartner ? 0 : Number(tip) || 0;
   const deliveryZone = deliveryZones.find((z) => z.id === deliveryZoneId);
   const isCustomDelivery = deliveryZoneId === "custom";
+  const isUber = deliveryZoneId === "uber";
+  // Uber Courier sends the WHOLE fee to the driver; ordinary deliveries split it.
+  const deliveryRate = isUber ? 1 : DRIVER_CUT_RATE;
   // The fee always comes from this editable input, not directly from the
   // zone -- picking a zone just pre-fills it as a starting point, so a
   // one-off adjustment (or a location that isn't in the zone list at all,
   // via "Custom") is always possible without touching Setup.
   const deliveryFee = forPartner ? 0 : (Number(deliveryFeeInput) || 0);
-  const deliveryLabel = isCustomDelivery ? "Custom" : (deliveryZone?.name || "");
+  const deliveryLabel = isUber ? DELIVERY_COURIER : isCustomDelivery ? "Custom" : (deliveryZone?.name || "");
   // Only Prashant does deliveries right now, so there's no driver picker --
   // this just finds him by name. If a delivery zone is picked but no
   // partner named "Prashant" exists (e.g. renamed), the fee still counts
   // as ordinary shared revenue; it just skips the personal delivery bonus
   // rather than silently crediting the wrong person.
-  const deliveryDriver = partners.find((p) => p.name.trim().toLowerCase() === "prashant" && isActiveNow(p));
+  const deliveryDriver = findDeliveryDriver(partners);
   // Discount comes off the food subtotal only -- not the tip or delivery
   // fee -- so the delivery driver's 60% cut is never affected by it.
   const discountAmount = forPartner ? 0 : discountAmountFor(subtotal, discountType, discountInput);
@@ -891,7 +903,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
     // Recomputed against the items actually being saved (blank/invalid
     // lines are filtered out above), not the on-screen subtotal.
     const discountSaved = forPartner ? 0 : discountAmountFor(itemsTotal, discountType, discountInput);
-    const finalTotal = itemsTotal - discountSaved + tipAmount + deliveryFee - creditToApply;
+    const finalTotal = orderTotalFromParts({ itemsTotal, discount: discountSaved, tip: tipAmount, deliveryFee, creditApplied: creditToApply });
     const ts = dateStringToTs(orderDate);
     const res = await onCreate(
       forPartner
@@ -902,7 +914,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
           }
         : {
             id: uid(), customer: customer.trim(), phone: "", items, tip: tipAmount,
-            deliveryZone: deliveryLabel, deliveryFee, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
+            deliveryZone: deliveryLabel, deliveryFee, deliveryCutRate: deliveryFee > 0 ? deliveryRate : 0, deliveryDriverId: deliveryFee > 0 ? (deliveryDriver?.id || "") : "",
             discount: discountSaved, discountType: discountSaved > 0 ? discountType : "", discountValue: discountSaved > 0 ? Number(discountInput) : 0,
             creditApplied: creditToApply, total: finalTotal, paid: false, ts,
           }
@@ -1016,11 +1028,12 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
                     onChange={(e) => {
                       const zid = e.target.value;
                       setDeliveryZoneId(zid);
-                      if (zid === "custom" || zid === "") setDeliveryFeeInput(zid === "" ? "" : deliveryFeeInput);
+                      if (zid === "custom" || zid === "uber" || zid === "") setDeliveryFeeInput(zid === "" ? "" : deliveryFeeInput);
                       else { const z = deliveryZones.find((zz) => zz.id === zid); setDeliveryFeeInput(z ? String(z.fee) : ""); }
                     }}>
                     <option value="">Not a delivery / picked up</option>
                     {deliveryZones.map((z) => <option key={z.id} value={z.id}>{z.name} — {money(z.fee)}</option>)}
+                    <option value="uber">Uber Courier (full fee to Prashant)</option>
                     <option value="custom">Custom (type your own fee)</option>
                   </select>
                   {deliveryZoneId && (
@@ -1034,7 +1047,9 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
                 {deliveryFee > 0 && (
                   <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
                     {deliveryDriver
-                      ? `${money(deliveryFee * 0.6)} goes straight to ${deliveryDriver.name}, ${money(deliveryFee * 0.4)} to shared profit.`
+                      ? (isUber
+                        ? `The full ${money(deliveryFee)} goes to ${deliveryDriver.name}.`
+                        : `${money(deliveryFee * deliveryRate)} goes straight to ${deliveryDriver.name}, ${money(deliveryFee * (1 - deliveryRate))} to shared profit.`)
                       : `No active partner named "Prashant" found -- the full ${money(deliveryFee)} will count as ordinary shared revenue instead.`}
                   </div>
                 )}
@@ -1071,22 +1086,63 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
   );
 }
 
+// Turns a saved order's items back into editable menu lines. Each saved
+// item is matched to a (category, item, style) in the live menu by SCORE, not
+// just by item name. Matching on name alone was the bug: this menu has two
+// different items both called "Regular" (Surti Aloopuri's, with Red Sev /
+// Papdi / Cheese styles, and Gughara's flat $12 one), and taking the first
+// match sent every Gughara item to Aloopuri -- where its $12 then looked
+// different from the $9 menu price. The score prefers, in order:
+//   - the exact item AND style (100), or the same pair with the two swapped
+//     (90 -- older orders saved the topping as the "name" and the style as
+//     the "style", e.g. "Red Sev (Regular)")
+//   - an item whose name matches but whose style doesn't (30)
+//   - then the saved price as a tiebreaker (+10), which is what tells two
+//     same-named items apart when neither has a matching style
+// Nothing that matches at all falls back to the first menu item, as before.
 function orderToLines(order, menu) {
+  const norm = (v) => String(v ?? "").trim().toLowerCase();
   return order.items.map((it) => {
-    for (const g of menu) {
-      const item = g.items.find((i) => i.name === it.name);
-      if (item) {
-        const variant = item.variants?.find((v) => v.label === it.variantLabel) || item.variants?.[0];
-        return { id: uid(), groupId: g.id, itemId: item.id, variantId: variant?.id || "", qty: it.qty, price: it.price };
+    const name = norm(it.name), style = norm(it.variantLabel), price = Number(it.price);
+    let best = null;
+    for (const g of menu || []) {
+      for (const item of g.items || []) {
+        const variants = item.variants && item.variants.length ? item.variants : [];
+        for (const v of variants) {
+          const iname = norm(item.name), vlabel = norm(v.label);
+          // a single unlabeled style stands in for "no style" on either side
+          const styleMatches = vlabel === style || (variants.length === 1 && style === "");
+          let score = 0;
+          if (iname === name && styleMatches) score = 100;
+          else if (iname === style && vlabel === name) score = 90;
+          else if (iname === name) score = 30;
+          else if (iname === style && style !== "") score = 20;
+          if (score === 0) continue;
+          if (Number(v.price) === price) score += 10;
+          if (!best || score > best.score) best = { score, g, item, v };
+        }
       }
     }
-    const g = menu[0]; const item = firstItem(g);
+    if (best) return { id: uid(), groupId: best.g.id, itemId: best.item.id, variantId: best.v?.id || "", qty: it.qty, price: it.price };
+    // Nothing matched by item name. Older orders were sometimes saved under a
+    // CATEGORY's own name (e.g. "Coco" from before it was split into 12 OZ /
+    // 1 Liter items) -- keep those in that category, on its closest-priced style.
+    const own = (menu || []).find((mg) => norm(mg.name) === name);
+    if (own) {
+      let near = null;
+      for (const item of own.items || []) for (const v of item.variants || []) {
+        const d = Math.abs(Number(v.price) - price);
+        if (!near || d < near.d) near = { d, item, v };
+      }
+      if (near) return { id: uid(), groupId: own.id, itemId: near.item.id, variantId: near.v.id, qty: it.qty, price: it.price };
+    }
+    const g = (menu || [])[0]; const item = firstItem(g);
     const v = firstVariant(item);
     return { id: uid(), groupId: g?.id || "", itemId: item?.id || "", variantId: v?.id || "", qty: it.qty, price: it.price };
   });
 }
 
-function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
+function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onCancel }) {
   const [customer, setCustomer] = useState(order.customer);
   const [phone, setPhone] = useState(order.phone || "");
   const [lines, setLines] = useState(orderToLines(order, menu));
@@ -1097,6 +1153,15 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const [submitting, setSubmitting] = useState(false);
   const [extraMethod, setExtraMethod] = useState("Cash");
   const [extraAmountOverride, setExtraAmountOverride] = useState(null); // null = still tracking the live diff automatically
+  // Delivery starts out as whatever the order already has: none, one of the
+  // zones, Uber Courier, or "custom" (a typed fee / a zone since removed).
+  const [deliveryZoneId, setDeliveryZoneId] = useState(() => {
+    if (!(Number(order.deliveryFee) > 0)) return "";
+    if (order.deliveryZone === DELIVERY_COURIER) return "uber";
+    const z = (deliveryZones || []).find((zz) => zz.name === order.deliveryZone);
+    return z ? z.id : "custom";
+  });
+  const [deliveryFeeInput, setDeliveryFeeInput] = useState(Number(order.deliveryFee) > 0 ? String(order.deliveryFee) : "");
   const getItemFor = (l) => menu.find((g) => g.id === l.groupId)?.items.find((i) => i.id === l.itemId);
   const getVariant = (l) => getItemFor(l)?.variants?.find((v) => v.id === l.variantId);
   const linePrice = (l) => {
@@ -1106,20 +1171,23 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   const lineTotal = (l) => linePrice(l) * (Number(l.qty) || 0);
   const subtotal = lines.reduce((s, l) => s + lineTotal(l), 0);
   const tipAmount = Number(tip) || 0;
-  // Everything in the saved total that ISN'T items, tip or discount -- the
-  // delivery fee, applied credit, and anything else baked in at creation.
-  // Worked out from what's stored (stored total minus its own items, tip
-  // and discount) rather than rebuilt from fields, so an edit that doesn't
-  // touch the items leaves the total exactly where it was. Previously the
-  // edit form recomputed the total as items + tip only, which silently
-  // dropped the delivery fee from edited delivery orders.
+  const isPartnerMeal = order.paymentMethod === INTERNAL_METHOD; // staff meals never have delivery
+  const creditApplied = Number(order.creditApplied) || 0;
   const baseItems = (order.items || []).reduce((s, i) => s + (Number(i.price) || 0) * (Number(i.qty) || 0), 0);
-  const otherAdjustments = Math.round(((Number(order.total) || 0) - (baseItems + (Number(order.tip) || 0) - (Number(order.discount) || 0))) * 100) / 100;
+  // The total is rebuilt from its parts -- items, discount, tip, delivery fee,
+  // applied credit -- with the same formula New Order uses. It used to keep
+  // the stored total and adjust around it, which also carried along any
+  // mistake already in it. `savedTotalOff` flags an order whose saved total
+  // doesn't match its own parts; saving corrects it.
+  const storedParts = orderTotalFromParts({ itemsTotal: baseItems, discount: Number(order.discount) || 0, tip: Number(order.tip) || 0, deliveryFee: Number(order.deliveryFee) || 0, creditApplied });
+  const savedTotalOff = Math.abs(storedParts - (Number(order.total) || 0)) > 0.011;
   // A % discount follows the new subtotal if items change; a $ discount
   // stays the same dollar amount (capped at the subtotal).
   const discountFor = (sub) => (order.discountType ? discountAmountFor(sub, order.discountType, order.discountValue) : 0);
   const discountAmount = discountFor(subtotal);
-  const total = subtotal - discountAmount + tipAmount + otherAdjustments;
+  const deliveryFee = !isPartnerMeal && deliveryZoneId ? Number(deliveryFeeInput) || 0 : 0;
+  const deliveryDriver = findDeliveryDriver(partners);
+  const total = orderTotalFromParts({ itemsTotal: subtotal, discount: discountAmount, tip: tipAmount, deliveryFee, creditApplied });
   // How much is actually logged as paid on this order right now, vs. what
   // the bill comes to after this edit. If they differ and the order was
   // already marked Paid, the payments ledger would otherwise silently go
@@ -1155,7 +1223,13 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     setSubmitting(true);
     const itemsTotal = items.reduce((s, i) => s + i.price * i.qty, 0);
     const discountSaved = discountFor(itemsTotal);
-    const newTotal = Math.round((itemsTotal - discountSaved + tipAmount + otherAdjustments) * 100) / 100;
+    // Delivery: Uber Courier sends the whole fee to the driver; a zone or custom
+    // fee splits it. A partner meal has none and is left exactly as it was.
+    const isUberSave = deliveryZoneId === "uber";
+    const feeSaved = isPartnerMeal ? 0 : (deliveryZoneId ? deliveryFee : 0);
+    const zoneSaved = isUberSave ? DELIVERY_COURIER : deliveryZoneId === "custom" ? "Custom" : ((deliveryZones || []).find((z) => z.id === deliveryZoneId)?.name || "");
+    const driverSaved = feeSaved > 0 ? (isUberSave ? (deliveryDriver?.id || order.deliveryDriverId || "") : (order.deliveryDriverId || deliveryDriver?.id || "")) : "";
+    const newTotal = orderTotalFromParts({ itemsTotal, discount: discountSaved, tip: tipAmount, deliveryFee: feeSaved, creditApplied });
 
     let payments = effectivePayments(order);
     let paid = order.paid;
@@ -1180,6 +1254,10 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
     const res = await onSave({
       ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: newTotal,
       discount: discountSaved,
+      ...(isPartnerMeal ? {} : {
+        deliveryZone: feeSaved > 0 ? zoneSaved : "", deliveryFee: feeSaved,
+        deliveryCutRate: feeSaved > 0 ? (isUberSave ? 1 : DRIVER_CUT_RATE) : 0, deliveryDriverId: driverSaved,
+      }),
       payments, paid, collectedBy: paid ? collectedBy : "", ts: dateStringToTs(orderDate),
     });
     setSubmitting(false);
@@ -1189,6 +1267,11 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
   return (
     <div style={{ ...card, borderColor: C.ember }}>
       <div style={cardTitle}>Editing order</div>
+      {savedTotalOff && (
+        <div style={{ marginBottom: 12, padding: 10, borderRadius: 10, background: C.warningTint, border: `1px solid ${C.warning}44`, fontSize: 13, color: C.warning }}>
+          This order's saved total ({money(order.total)}) doesn't add up to its items, tip, delivery, discount and credit ({money(storedParts)}). Saving corrects it to {money(storedParts)}.
+        </div>
+      )}
       <label style={fieldLabel}>Customer name</label>
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
       <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number (optional)</label>
@@ -1210,6 +1293,41 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       <button onClick={addLine} style={ghostBtn} className="om-btn"><Plus size={14} /> Add another item</button>
       <label style={{ ...fieldLabel, marginTop: 16 }}>Tip (optional)</label>
       <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 140 }} placeholder="$0.00" value={tip} onChange={(e) => setTip(e.target.value)} />
+      {!isPartnerMeal && (
+        <>
+          <label style={{ ...fieldLabel, marginTop: 16 }}>Delivery (optional)</label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <select className="om-input" style={{ ...input, width: 220, marginTop: 0 }} value={deliveryZoneId}
+              onChange={(e) => {
+                const zid = e.target.value;
+                setDeliveryZoneId(zid);
+                if (zid === "") setDeliveryFeeInput("");
+                else if (zid !== "custom" && zid !== "uber") { const z = (deliveryZones || []).find((zz) => zz.id === zid); setDeliveryFeeInput(z ? String(z.fee) : ""); }
+              }}>
+              <option value="">Not a delivery / picked up</option>
+              {(deliveryZones || []).map((z) => <option key={z.id} value={z.id}>{z.name} — {money(z.fee)}</option>)}
+              <option value="uber">Uber Courier (full fee to Prashant)</option>
+              <option value="custom">Custom (type your own fee)</option>
+            </select>
+            {deliveryZoneId && (
+              <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, width: 100, marginTop: 0 }}
+                placeholder="Fee $" value={deliveryFeeInput} onChange={(e) => setDeliveryFeeInput(e.target.value)} />
+            )}
+          </div>
+          {deliveryZoneId && deliveryFee === 0 && (
+            <div style={{ fontSize: 12, color: C.warning, marginTop: 6 }}>Enter a delivery fee, or switch back to "Not a delivery" if there isn't one.</div>
+          )}
+          {deliveryFee > 0 && (
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
+              {deliveryDriver
+                ? (deliveryZoneId === "uber"
+                  ? `The full ${money(deliveryFee)} goes to ${deliveryDriver.name}.`
+                  : `${money(deliveryFee * DRIVER_CUT_RATE)} goes straight to ${deliveryDriver.name}, ${money(deliveryFee * (1 - DRIVER_CUT_RATE))} to shared profit.`)
+                : `No active partner named "Prashant" found -- the full ${money(deliveryFee)} will count as ordinary shared revenue instead.`}
+            </div>
+          )}
+        </>
+      )}
       <label style={{ ...fieldLabel, marginTop: 16 }}>Order date</label>
       <input type="date" className="om-input" style={{ ...input, width: 170 }} value={orderDate} max={todayDateString()} onChange={(e) => setOrderDate(e.target.value)} />
       <ErrorText>{error}</ErrorText>
@@ -1233,13 +1351,13 @@ function OrderEditForm({ order, menu, partners, onSave, onCancel }) {
       {order.paid && diff < -0.001 && (
         <div style={{ marginTop: 14, padding: 12, borderRadius: 10, background: C.warningTint, border: `1px solid ${C.warning}44` }}>
           <div style={{ fontSize: 13, color: C.warning, fontWeight: 600 }}>
-            This removes {money(-diff)} from a bill already marked Paid — that amount will be taken off the most recently logged payment(s) so the Cash Drawer total stays accurate.
+            This removes {money(-diff)} from a bill already marked Paid — that amount will be taken off the most recently logged payment(s), as if refunded. If the customer is keeping it as credit instead, save, then use "Paid more than the bill?" on the order.
           </div>
         </div>
       )}
       <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-        {tipAmount > 0 && (
-          <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)}{discountAmount > 0 ? ` − discount ${money(discountAmount)}` : ""} + tip {money(tipAmount)}{order.deliveryFee > 0 ? ` + delivery ${money(order.deliveryFee)}` : ""}{order.creditApplied > 0 ? ` − credit ${money(order.creditApplied)}` : ""}</div>
+        {(tipAmount > 0 || discountAmount > 0 || deliveryFee > 0 || creditApplied > 0) && (
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>Subtotal {money(subtotal)}{discountAmount > 0 ? ` − discount ${money(discountAmount)}` : ""}{tipAmount > 0 ? ` + tip ${money(tipAmount)}` : ""}{deliveryFee > 0 ? ` + delivery ${money(deliveryFee)}` : ""}{creditApplied > 0 ? ` − credit ${money(creditApplied)}` : ""}</div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
@@ -1724,8 +1842,9 @@ function CreditEditForm({ entry, onSave, onCancel }) {
   );
 }
 
-function CreditReimburseForm({ balance, onConfirm, onCancel }) {
+function CreditReimburseForm({ balance, partners, onConfirm, onCancel }) {
   const [method, setMethod] = useState("Cash");
+  const [paidBy, setPaidBy] = useState(""); // "" = the business paid it; otherwise a partner paid it from their own money
   const [amount, setAmount] = useState(balance.toFixed(2));
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1739,7 +1858,7 @@ function CreditReimburseForm({ balance, onConfirm, onCancel }) {
     submittedRef.current = true;
     setError("");
     setSubmitting(true);
-    const res = await onConfirm(method, amt);
+    const res = await onConfirm(method, amt, paidBy);
     setSubmitting(false);
     if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
   };
@@ -1754,7 +1873,16 @@ function CreditReimburseForm({ balance, onConfirm, onCancel }) {
         <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
           value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
       </div>
-      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>This is logged as money paid out, so it's deducted from the {method} total above.</div>
+      <label style={{ ...fieldLabel, marginTop: 10 }}>Paid by</label>
+      <select className="om-input" style={{ ...input, marginTop: 4 }} value={paidBy} onChange={(e) => setPaidBy(e.target.value)}>
+        <option value="">Shared account (the business paid it)</option>
+        {(partners || []).filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>{p.name} (from their own money)</option>)}
+      </select>
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+        {paidBy
+          ? `${(partners || []).find((p) => p.id === paidBy)?.name || "They"} paid this from their own ${method}, so it's added back to their balance and no ${method} total changes.`
+          : `This is logged as money paid out, so it's deducted from the ${method} total above.`}
+      </div>
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
@@ -1766,7 +1894,7 @@ function CreditReimburseForm({ balance, onConfirm, onCancel }) {
   );
 }
 
-function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCredit }) {
+function CustomerCreditsPanel({ credits, partners, onUpdateCredit, onDeleteCredit, onAddCredit }) {
   const [expandedCustomer, setExpandedCustomer] = useState(null);
   const [editingEntryId, setEditingEntryId] = useState(null);
   const [reimbursingCustomer, setReimbursingCustomer] = useState(null);
@@ -1807,9 +1935,10 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCr
             </div>
             {reimbursingCustomer === c.customer && (
               <div style={{ marginTop: 6 }}>
-                <CreditReimburseForm balance={c.balance}
-                  onConfirm={async (method, amt) => {
-                    const res = await onAddCredit({ customer: c.customer, amount: -amt, method, kind: "reimbursement", note: `Reimbursed via ${method}` });
+                <CreditReimburseForm balance={c.balance} partners={partners}
+                  onConfirm={async (method, amt, paidBy) => {
+                    const payer = paidBy ? partners.find((p) => p.id === paidBy)?.name : "";
+                    const res = await onAddCredit({ customer: c.customer, amount: -amt, method, kind: "reimbursement", paidBy, note: `Reimbursed via ${method}${payer ? ` (paid by ${payer})` : ""}` });
                     if (res.ok) setReimbursingCustomer(null);
                     return res;
                   }}
@@ -2252,12 +2381,12 @@ function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, to
       <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} menu={menu} />
-      <CustomerCreditsPanel credits={credits} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
+      <CustomerCreditsPanel credits={credits} partners={partners} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
     </div>
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, onRemovePayment, onUpdate, onDelete, onAddCredit }) {
+function OrderHistoryTab({ menu, orders, partners, deliveryZones, onTogglePaid, onAddPayment, onRemovePayment, onUpdate, onDelete, onAddCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
@@ -2395,7 +2524,7 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {filteredOrders.map((o) =>
             editingId === o.id ? (
-              <OrderEditForm key={o.id} order={o} menu={menu} partners={partners}
+              <OrderEditForm key={o.id} order={o} menu={menu} partners={partners} deliveryZones={deliveryZones}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
             ) : pickingCollectorId === o.id ? (
@@ -2450,7 +2579,7 @@ function OrderHistoryTab({ menu, orders, partners, onTogglePaid, onAddPayment, o
                   )}
                   {o.deliveryFee > 0 && (
                     <div style={{ fontSize: 12, color: C.ember, marginTop: 2 }}>
-                      🚗 {o.deliveryZone || "Delivery"} — {money(o.deliveryFee)}{o.deliveryDriverId ? ` (${partnerName(o.deliveryDriverId) || "Unknown"}'s delivery)` : ""}
+                      🚗 {o.deliveryZone || "Delivery"} — {money(o.deliveryFee)}{o.deliveryDriverId ? (driverCutRate(o) === 1 ? ` (full fee to ${partnerName(o.deliveryDriverId) || "Unknown"})` : ` (${partnerName(o.deliveryDriverId) || "Unknown"}'s delivery)`) : ""}
                     </div>
                   )}
                   {o.paid && (() => {
@@ -2978,9 +3107,10 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
           const myShare = totals.perPartnerShare[p.id] || 0;
           // Their part of anyone else's negotiated settlement (+ saves them
           // money, - costs them) -- see computeSettlementAdjustments.
+          const refundsPaid = totals.refundsPaidByPartner[p.id] || 0;
           const settlementAdj = totals.settlementAdjustmentByPartner[p.id] || 0;
           const sInfo = totals.settlementInfo[p.id]; // only set for a partner with a negotiated settlement
-          const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings + settlementAdj;
+          const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings + refundsPaid + settlementAdj;
           const isInactive = Boolean(p.inactiveSince);
           return (
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
@@ -3010,8 +3140,14 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
               )}
               {deliveryEarnings > 0 && (
                 <>
-                  <div style={statLabel}>Delivery earnings (60% of fees, direct)</div>
+                  <div style={statLabel}>Delivery earnings (direct)</div>
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(deliveryEarnings)}</div>
+                </>
+              )}
+              {refundsPaid > 0 && (
+                <>
+                  <div style={statLabel}>Customer refunds paid personally</div>
+                  <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(refundsPaid)}</div>
                 </>
               )}
               {Math.abs(settlementAdj) > 0.004 && (
@@ -3451,7 +3587,7 @@ function DeliveryZonesCard({ zones, onAdd, onUpdate, onRemove }) {
   return (
     <div style={{ ...card, marginTop: 24 }}>
       <div style={cardTitle}>Delivery zones & fees</div>
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Used by the delivery picker on New Order. 60% of the fee goes straight to the delivering partner, 40% to shared profit.</div>
+      <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>Used by the delivery picker on New Order and when editing an order. 60% of the fee goes straight to the delivering partner, 40% to shared profit. Uber Courier deliveries are separate: the whole fee goes to the driver.</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
         {zones.map((z) => (
           <div key={z.id} style={{ display: "flex", gap: 8, alignItems: "center", background: C.paper, borderRadius: 10, padding: 10 }}>

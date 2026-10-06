@@ -284,7 +284,14 @@ export async function POST(req) {
         // order leaves it unset, since neither of those move real money.
         // computePaymentTypeTotals uses its presence to tell the two
         // apart.
-        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method || "", kind: payload.kind || "", ts: Date.now() }, ...credits];
+        // `paidBy` = a partner who paid this refund out of their OWN money. It's
+        // then credited back to them and doesn't lower the business's totals.
+        // Empty means the business paid it (the default).
+        if (payload.paidBy) {
+          const known = await getOrInitPartners();
+          if (!known.some((p) => p.id === payload.paidBy)) return badRequest("That partner doesn't exist.");
+        }
+        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method || "", kind: payload.kind || "", paidBy: payload.paidBy || "", ts: Date.now() }, ...credits];
         await setKey("credits", credits);
         return Response.json({ credits });
       } else if (action === "update") {
