@@ -257,9 +257,11 @@ export async function POST(req) {
         // alongside it -- this replaces the DISPLAYED "what to pay them"
         // figure, not the underlying math.
         if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: payload.amount, settlementNote: payload.note || "" } : p));
+        // settlementSetAt marks when it was agreed, so payouts recorded after
+        // that count as paying this settlement (not as extra withdrawals).
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: payload.amount, settlementNote: payload.note || "", settlementSetAt: Date.now() } : p));
       } else if (action === "clear-settlement") {
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: null, settlementNote: "" } : p));
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: null, settlementNote: "", settlementSetAt: null } : p));
       }
       await setKey("partners", partners);
       return Response.json({ partners });
@@ -282,7 +284,7 @@ export async function POST(req) {
         // order leaves it unset, since neither of those move real money.
         // computePaymentTypeTotals uses its presence to tell the two
         // apart.
-        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method || "", ts: Date.now() }, ...credits];
+        credits = [{ id: uid(), customer: payload.customer.trim(), amount: payload.amount, note: payload.note || "", method: payload.method || "", kind: payload.kind || "", ts: Date.now() }, ...credits];
         await setKey("credits", credits);
         return Response.json({ credits });
       } else if (action === "update") {

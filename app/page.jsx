@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -32,11 +32,6 @@ function todayDateString() {
 function startOfDayTs(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return new Date(y, m - 1, d, 0, 0, 0).getTime();
-}
-// Can this partner be picked for something new right now? Not if they've
-// left, and not if their start date hasn't arrived yet.
-function isActiveNow(p) {
-  return !p.inactiveSince && (!p.activeFrom || p.activeFrom <= Date.now());
 }
 // Filters orders to a plate-totals reporting period. "today"/"month" use
 // calendar-day/calendar-month comparisons (via tsToDateString, consistent
@@ -274,17 +269,37 @@ export default function HomePage() {
     // Instead it's carved out of the shared pool entirely: netProfit only
     // ever sees the remaining 40%, and the driver's 60% is tracked and
     // credited to them directly, dollar for dollar.
+    // The driver is only credited for what has actually been COLLECTED on the
+    // order: a delivery on a part-paid or unpaid order earns its cut as the
+    // money comes in, in proportion. (Crediting the full cut up front put the
+    // driver ahead of the cash -- the partners were collectively owed more
+    // than had been collected until the customer paid.) A fully paid order is
+    // unchanged: 60% of the fee, in full.
+    const driverCutFor = (o) => {
+      if (!(o.deliveryDriverId && Number(o.deliveryFee) > 0)) return 0;
+      const paid = paymentsTotal(o);
+      const total = Number(o.total) || 0;
+      const collectedShare = total > 0.005 ? Math.min(1, paid / total) : 1;
+      return Math.min(Number(o.deliveryFee) * 0.6 * collectedShare, Math.max(0, paid));
+    };
     const deliveryEarningsByPartner = {};
     let totalDeliveryDriverEarnings = 0;
     visibleOrders.forEach((o) => {
-      if (o.deliveryDriverId && Number(o.deliveryFee) > 0) {
-        const driverCut = Number(o.deliveryFee) * 0.6;
+      const driverCut = driverCutFor(o);
+      if (driverCut > 0) {
         deliveryEarningsByPartner[o.deliveryDriverId] = (deliveryEarningsByPartner[o.deliveryDriverId] || 0) + driverCut;
         totalDeliveryDriverEarnings += driverCut;
       }
     });
     const expenseTotal = expenses.reduce((s, e) => s + Number(e.amount || 0), 0);
-    const netProfit = income - expenseTotal - totalDeliveryDriverEarnings;
+    // Money handed back to customers (a Reimburse on their credit). When they
+    // overpaid, the extra was counted as income -- and so as profit -- but
+    // it was never really ours. Giving it back takes it off profit again.
+    // Credit used up on a later order is NOT included: that order's total
+    // already shrank by the same amount, so it corrects itself.
+    const reimbursements = (credits || []).filter((c) => isReimbursement(c) && Number(c.amount) < 0);
+    const totalReimbursed = reimbursements.reduce((s, c) => s - Number(c.amount), 0);
+    const netProfit = income - expenseTotal - totalDeliveryDriverEarnings - totalReimbursed;
     // A partner who was active for only part of history shouldn't have
     // that reshuffle everyone else's past shares -- so profit isn't just
     // divided by today's partner count. Instead, every dollar is divided
@@ -306,7 +321,7 @@ export default function HomePage() {
       // The driver's 60% never enters the shared pool for this order --
       // only the remaining amount (delivery's 40% + everything else) gets
       // split among active partners below.
-      if (o.deliveryDriverId && Number(o.deliveryFee) > 0) amt -= Number(o.deliveryFee) * 0.6;
+      amt -= driverCutFor(o);
       if (amt <= 0) return;
       const activeAt = activePartnersAt(o.ts);
       if (activeAt.length === 0) return;
@@ -324,6 +339,13 @@ export default function HomePage() {
         ? partners.filter((p) => e.sharedBy.includes(p.id))
         : null;
       const sharers = named && named.length > 0 ? named : activePartnersAt(e.ts);
+      if (sharers.length === 0) return;
+      const per = amt / sharers.length;
+      sharers.forEach((p) => { perPartnerShare[p.id] -= per; });
+    });
+    reimbursements.forEach((c) => {
+      const amt = -Number(c.amount);
+      const sharers = activePartnersAt(c.ts);
       if (sharers.length === 0) return;
       const per = amt / sharers.length;
       sharers.forEach((p) => { perPartnerShare[p.id] -= per; });
@@ -361,10 +383,19 @@ export default function HomePage() {
       // they fronted business money personally, so it's credited back.
       paidExpensesByPartner[p.id] = expenses.filter((e) => e.paidBy === p.id).reduce((s, e) => s + Number(e.amount || 0), 0);
     });
+    // Each partner's balance before any negotiated-settlement adjustment, then
+    // the adjustments themselves (see computeSettlementAdjustments).
+    const baseBalance = {};
+    partners.forEach((p) => {
+      baseBalance[p.id] = (perPartnerShare[p.id] || 0) - (withdrawnByPartner[p.id] || 0) - (collectedByPartner[p.id] || 0)
+        + (paidExpensesByPartner[p.id] || 0) + (deliveryEarningsByPartner[p.id] || 0);
+    });
+    const { adjustmentByPartner: settlementAdjustmentByPartner, infoByPartner: settlementInfo } =
+      computeSettlementAdjustments(partners, baseBalance, withdrawals);
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
-    return { income, pending, expenseTotal, netProfit, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, expensePercent, profitPercent };
-  }, [visibleOrders, expenses, withdrawals, partners]);
+    return { income, pending, expenseTotal, netProfit, totalReimbursed, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, settlementAdjustmentByPartner, settlementInfo, expensePercent, profitPercent };
+  }, [visibleOrders, expenses, withdrawals, partners, credits]);
 
   const GlobalStyle = () => (
     <style>{`
@@ -883,7 +914,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
       // reconciliation as a direct reimbursement -- using credit toward a
       // new order still counts as "using it," so it comes off the Cash
       // total the same way handing cash back would.
-      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", note: "Applied to a new order" });
+      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", kind: "applied", note: "Applied to a new order" });
     }
     setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId(""); setDeliveryFeeInput(""); setDiscountInput(""); setDiscountType("amount");
   };
@@ -907,7 +938,7 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
               <>
                 <label style={fieldLabel}>Which partner?</label>
                 <select className="om-input" style={input} value={partnerId} onChange={(e) => setPartnerId(e.target.value)}>
-                  {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  {partners.filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
                 <label style={{ ...fieldLabel, marginTop: 12 }}>How is this being settled?</label>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -1246,7 +1277,7 @@ function CollectorPicker({ order, partners, onConfirm, onCancel }) {
       <label style={fieldLabel}>Who collected this payment?</label>
       <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
         <option value="">Shared account</option>
-        {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {partners.filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
@@ -1622,7 +1653,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
               <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
                 value={r.collectedBy} onChange={(e) => updateRow(i, { collectedBy: e.target.value })}>
                 <option value="">Zelle → shared account</option>
-                {partners.filter(isActiveNow).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
+                {partners.filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
               </select>
             )}
             {rows.length > 1 && (
@@ -1778,7 +1809,7 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCr
               <div style={{ marginTop: 6 }}>
                 <CreditReimburseForm balance={c.balance}
                   onConfirm={async (method, amt) => {
-                    const res = await onAddCredit({ customer: c.customer, amount: -amt, method, note: `Reimbursed via ${method}` });
+                    const res = await onAddCredit({ customer: c.customer, amount: -amt, method, kind: "reimbursement", note: `Reimbursed via ${method}` });
                     if (res.ok) setReimbursingCustomer(null);
                     return res;
                   }}
@@ -1813,50 +1844,6 @@ function CustomerCreditsPanel({ credits, onUpdateCredit, onDeleteCredit, onAddCr
       </div>
     </div>
   );
-}
-
-function computePaymentTypeTotals(orders, credits, withdrawals, expenses) {
-  const map = {};
-  // Every logged payment counts toward the drawer, whether or not the
-  // order it belongs to is fully paid yet -- a $20 cash payment on a
-  // still-"Unpaid" order is real cash you're holding right now.
-  orders.forEach((o) => {
-    effectivePayments(o).forEach((p) => {
-      const method = p.method || "Cash";
-      map[method] = (map[method] || 0) + (Number(p.amount) || 0);
-    });
-  });
-  // Credit reimbursements (money physically paid OUT to settle a credit
-  // balance) reduce whichever method it was paid out from. Only entries
-  // tagged with a `method` count here -- an ordinary credit adjustment or
-  // credit applied toward a new order has no `method`, since neither of
-  // those moves real money out of the drawer.
-  (credits || []).forEach((c) => {
-    if (c.method) map[c.method] = (map[c.method] || 0) + (Number(c.amount) || 0); // amount is already negative
-  });
-  // A partner withdrawal is money physically leaving the business, so it
-  // comes off whichever method it was paid out in. Withdrawals saved before
-  // a method was recorded have none -- those are treated as Cash, the same
-  // default every other payment uses.
-  (withdrawals || []).forEach((w) => {
-    const method = w.method || "Cash";
-    map[method] = (map[method] || 0) - (Number(w.amount) || 0);
-  });
-  // An expense paid from the shared account is money leaving the business,
-  // so it comes off whichever method it was paid with. Deliberately only
-  // expenses that SAY how they were paid (paidWith) count: older expenses
-  // have no method recorded and may well have been paid some other way
-  // entirely, so deducting them all as Cash would swing the total by
-  // hundreds of dollars on a guess. Expenses a partner paid out of their
-  // own pocket never come off the business totals -- that's their money,
-  // handled through their balance instead.
-  (expenses || []).forEach((e) => {
-    if (e.paidBy || !e.paidWith) return;
-    map[e.paidWith] = (map[e.paidWith] || 0) - (Number(e.amount) || 0);
-  });
-  const realMethods = PAYMENT_METHODS.filter((m) => map[m] !== undefined).map((m) => ({ method: m, total: map[m], internal: false }));
-  const internal = map[INTERNAL_METHOD] !== undefined ? [{ method: INTERNAL_METHOD, total: map[INTERNAL_METHOD], internal: true }] : [];
-  return [...realMethods, ...internal];
 }
 
 function PaymentTypeTotals({ orders, credits, withdrawals, expenses }) {
@@ -2097,9 +2084,13 @@ function PlateTotalsTab({ orders, menu }) {
     .map((c) => ({ ...c, rows: [...c.rows].sort((a, b) => b.qty - a.qty) }))
     .sort((a, b) => b.qty - a.qty);
   const totalPlates = categories.reduce((s, c) => s + c.qty, 0);
-  const totalOrderValue = filtered.reduce((s, o) => s + (Number(o.total) || 0), 0);
-  const paidCollected = filtered.reduce((s, o) => s + paymentsTotal(o), 0);
-  const unpaidRemaining = Math.max(0, totalOrderValue - paidCollected);
+  // Worked out order by order, so a customer who overpaid never cancels out
+  // someone else's unpaid balance (see orderMoneySummary).
+  const money_ = orderMoneySummary(filtered);
+  const totalOrderValue = money_.value;
+  const paidCollected = money_.paidToward;
+  const unpaidRemaining = money_.owed;
+  const overpaid = money_.extra;
   const topItems = categories
     .flatMap((c) => c.rows.map((r) => ({ ...r, category: c.name })))
     .sort((a, b) => b.qty - a.qty)
@@ -2149,6 +2140,7 @@ function PlateTotalsTab({ orders, menu }) {
             <span style={{ color: C.moss }}>Paid {money(paidCollected)}</span>
             <span style={{ color: unpaidRemaining > 0 ? C.warning : C.muted }}>Unpaid {money(unpaidRemaining)}</span>
           </div>
+          {overpaid > 0.005 && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>+ {money(overpaid)} extra handed over (owed back to customers)</div>}
         </div>
       </div>
 
@@ -2195,10 +2187,62 @@ function PlateTotalsTab({ orders, menu }) {
   );
 }
 
+// Re-derives the important totals a second way and compares them (see
+// auditTotals in lib/defaults.js). Anything that doesn't reconcile is shown
+// right here with exactly which records are involved, so a wrong number gets
+// caught on the screen instead of at the cash drawer.
+function TotalsCheckCard({ orders, expenses, withdrawals, credits, partners, totals }) {
+  const [showPassed, setShowPassed] = useState(false);
+  const { checks, worst } = auditTotals({ orders, expenses, withdrawals, credits, partners, totals });
+  const problems = checks.filter((c) => c.status !== "ok");
+  const passed = checks.filter((c) => c.status === "ok");
+  const colorOf = (st) => (st === "error" ? C.danger : st === "warn" ? C.warning : C.moss);
+  const iconOf = (st) => (st === "error" ? "✗" : st === "warn" ? "⚠" : "✓");
+  const row = (c) => (
+    <div key={c.id} style={{ padding: "8px 0", borderTop: `1px solid ${C.border}` }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+        <span style={{ color: colorOf(c.status), fontWeight: 700, width: 16 }}>{iconOf(c.status)}</span>
+        <span style={{ fontSize: 14, fontWeight: 600 }}>{c.title}</span>
+        <span style={{ fontSize: 12, color: colorOf(c.status), marginLeft: "auto", textAlign: "right" }}>{c.summary}</span>
+      </div>
+      {c.details.length > 0 && (c.status !== "ok" || showPassed) && (
+        <ul style={{ margin: "6px 0 0 24px", padding: 0, fontSize: 12, color: C.muted, lineHeight: 1.5 }}>
+          {c.details.map((d, i) => <li key={i} style={{ marginBottom: 2 }}>{d}</li>)}
+        </ul>
+      )}
+    </div>
+  );
+  return (
+    <div style={{ ...card, marginBottom: 18, borderColor: worst === "ok" ? C.moss : colorOf(worst) }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+        <div>
+          <div style={{ ...cardTitle, marginBottom: 2 }}>Totals check</div>
+          <div style={{ fontSize: 12, color: C.muted }}>Every total re-derived a second way and compared</div>
+        </div>
+        <span style={{ fontSize: 13, fontWeight: 700, color: colorOf(worst), border: `1px solid ${colorOf(worst)}`, borderRadius: 999, padding: "4px 12px" }}>
+          {worst === "ok" ? "✓ All totals reconcile" : `${problems.length} to look at`}
+        </span>
+      </div>
+      <div style={{ marginTop: 10 }}>
+        {problems.map(row)}
+        {passed.length > 0 && (
+          <>
+            <button onClick={() => setShowPassed((v) => !v)} className="om-btn" style={{ ...quickTagBtn, borderColor: C.border, color: C.muted, marginTop: 10 }}>
+              {showPassed ? "Hide" : "Show"} {passed.length} passed check{passed.length === 1 ? "" : "s"}
+            </button>
+            {showPassed && passed.map(row)}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   return (
     <div>
       <KpiCards orders={orders} totals={totals} />
+      <TotalsCheckCard orders={orders} expenses={expenses} withdrawals={withdrawals} credits={credits} partners={partners} totals={totals} />
       <DailyBarChart orders={orders} />
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
         <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
@@ -2932,7 +2976,11 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
           const paidPersonally = totals.paidExpensesByPartner[p.id] || 0;
           const deliveryEarnings = totals.deliveryEarningsByPartner[p.id] || 0;
           const myShare = totals.perPartnerShare[p.id] || 0;
-          const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings;
+          // Their part of anyone else's negotiated settlement (+ saves them
+          // money, - costs them) -- see computeSettlementAdjustments.
+          const settlementAdj = totals.settlementAdjustmentByPartner[p.id] || 0;
+          const sInfo = totals.settlementInfo[p.id]; // only set for a partner with a negotiated settlement
+          const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings + settlementAdj;
           const isInactive = Boolean(p.inactiveSince);
           return (
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
@@ -2966,13 +3014,27 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.success }}>+{money(deliveryEarnings)}</div>
                 </>
               )}
+              {Math.abs(settlementAdj) > 0.004 && (
+                <>
+                  <div style={statLabel}>Share of a partner's settlement</div>
+                  <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: settlementAdj < 0 ? C.danger : C.success }}>{settlementAdj < 0 ? "-" : "+"}{money(Math.abs(settlementAdj))}</div>
+                </>
+              )}
               <div style={statLabel}>Current balance {p.settlementOverride != null ? "(calculated)" : ""}</div>
-              <div style={{ ...displayNum, fontSize: p.settlementOverride != null ? 15 : 21, color: p.settlementOverride != null ? C.muted : C.ember, textDecoration: p.settlementOverride != null ? "line-through" : "none" }}>{money(balance)}</div>
-              {p.settlementOverride != null && (
+              <div style={{ ...displayNum, fontSize: p.settlementOverride != null ? 15 : 21, color: p.settlementOverride != null ? C.muted : C.ember, textDecoration: p.settlementOverride != null ? "line-through" : "none" }}>{money(sInfo ? sInfo.beforePayout : balance)}</div>
+              {p.settlementOverride != null && sInfo && (
                 <>
                   <div style={{ ...statLabel, marginTop: 8 }}>Negotiated settlement (final)</div>
                   <div style={{ ...displayNum, fontSize: 21, color: C.ember }}>{money(p.settlementOverride)}</div>
                   {p.settlementNote && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{p.settlementNote}</div>}
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
+                    {Math.abs(sInfo.delta) > 0.004
+                      ? `${money(Math.abs(sInfo.delta))} ${sInfo.delta > 0 ? "more" : "less"} than calculated -- ${sInfo.bearerCount > 0 ? `shared equally by the ${sInfo.bearerCount} remaining partner${sInfo.bearerCount === 1 ? "" : "s"}` : "no remaining partners to share it"}.`
+                      : "Same as the calculated balance."}
+                  </div>
+                  {sInfo.paidSince > 0 && (
+                    <div style={{ fontSize: 12, color: C.moss, marginTop: 4 }}>Paid so far {money(sInfo.paidSince)} · still to pay {money(Math.max(0, sInfo.remaining))}</div>
+                  )}
                 </>
               )}
               <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
