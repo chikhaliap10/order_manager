@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill, creditKey, groupCreditsByCustomer, overpaymentStatus, zelleCollectorOf, withZelleCollector } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill, creditKey, groupCreditsByCustomer, overpaymentStatus, zelleCollectorOf, withZelleCollector, sortOrdersByDate } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -44,13 +44,24 @@ function startOfDayTs(dateStr) {
 function filterOrdersByPeriod(orders, period, customRange) {
   if (period === "all") return orders;
   const now = Date.now();
+  // Every option here works on the date the ORDER is for (o.ts, the date picked
+  // on the order) -- never on the day it was typed in or paid.
   if (period === "today") {
     const todayStr = todayDateString();
     return orders.filter((o) => tsToDateString(o.ts || now) === todayStr);
   }
+  if (period === "yesterday") {
+    const y = new Date(now); y.setDate(y.getDate() - 1);
+    const yStr = tsToDateString(y.getTime());
+    return orders.filter((o) => tsToDateString(o.ts || now) === yStr);
+  }
   if (period === "week") {
-    const weekMs = 7 * 24 * 60 * 60 * 1000;
-    return orders.filter((o) => now - (o.ts || now) <= weekMs && now - (o.ts || now) >= 0);
+    // Today and the six calendar days before it. (This used to count 7x24 hours
+    // back from the current moment, so whether an order from a week ago showed
+    // up depended on what time of day you looked.)
+    const start = new Date(now); start.setDate(start.getDate() - 6);
+    const from = tsToDateString(start.getTime()), to = todayDateString();
+    return orders.filter((o) => { const d = tsToDateString(o.ts || now); return d >= from && d <= to; });
   }
   if (period === "month") {
     const nowDate = new Date(now);
@@ -2487,6 +2498,11 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
   const [returningId, setReturningId] = useState(null);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all"); // all | paid | unpaid
+  const [dateOrder, setDateOrder] = useState("newest"); // newest | oldest
+  // Which day's orders to show, by the ORDER's date. "all" until you pick one.
+  const [datePeriod, setDatePeriod] = useState("all"); // all | today | yesterday | week | month | custom
+  const [dateFrom, setDateFrom] = useState(todayDateString());
+  const [dateTo, setDateTo] = useState(todayDateString());
   const [methodFilter, setMethodFilter] = useState("all"); // all | Cash | Zelle | Debit Card | Credit Card
   const [collectorFilter, setCollectorFilter] = useState("all"); // all | shared | <partnerId>
 
@@ -2565,7 +2581,8 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
   const orderCollectors = (o) =>
     [...new Set(effectivePayments(o).filter((p) => (p.method === "Zelle" || p.method === INTERNAL_METHOD) && p.collectedBy).map((p) => p.collectedBy))];
 
-  const filteredOrders = orders.filter((o) => {
+  const datedOrders = filterOrdersByPeriod(orders, datePeriod, { from: dateFrom, to: dateTo });
+  const filteredOrders = datedOrders.filter((o) => {
     if (search.trim() && !o.customer.toLowerCase().includes(search.trim().toLowerCase())) return false;
     if (statusFilter === "paid" && !o.paid) return false;
     if (statusFilter === "unpaid" && o.paid) return false;
@@ -2581,12 +2598,41 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
     return true;
   });
 
+  // Newest date first (or oldest first), with a date heading above each day.
+  const sortedOrders = sortOrdersByDate(filteredOrders, dateOrder);
+  const ordersPerDay = {};
+  sortedOrders.forEach((o) => { const k = tsToDateString(o.ts || 0); ordersPerDay[k] = (ordersPerDay[k] || 0) + 1; });
+  const longDate = (ts) => new Date(ts || 0).toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric", year: "numeric" });
+  const shortDate = (ts) => new Date(ts || 0).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
   return (
     <div>
       <div style={safetyNote}><ShieldCheck size={15} /> Every order is saved to the database and synced to Google Sheets as a backup — nothing is lost.</div>
 
       <div style={{ ...card, marginTop: 18, marginBottom: 18 }}>
-        <label style={fieldLabel}>Search by customer name</label>
+        <label style={fieldLabel}>Order date</label>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
+          {[["all", "All dates"], ["today", "Today"], ["yesterday", "Yesterday"], ["week", "Last 7 days"], ["month", "This month"], ["custom", "Pick dates"]].map(([id, label]) => (
+            <button key={id} onClick={() => setDatePeriod(id)} className="om-btn"
+              style={{ ...quickTagBtn, background: datePeriod === id ? C.moss : "transparent", color: datePeriod === id ? "#FAF6EE" : C.muted, borderColor: datePeriod === id ? C.moss : C.border }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {datePeriod === "custom" && (
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap", marginTop: 8 }}>
+            <div>
+              <label style={fieldLabel}>From</label>
+              <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={dateFrom} max={dateTo} onChange={(e) => setDateFrom(e.target.value)} />
+            </div>
+            <div>
+              <label style={fieldLabel}>To</label>
+              <input type="date" className="om-input" style={{ ...input, marginTop: 0 }} value={dateTo} min={dateFrom} onChange={(e) => setDateTo(e.target.value)} />
+            </div>
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>These use the date on the order itself, not the day it was entered.</div>
+        <label style={{ ...fieldLabel, marginTop: 14 }}>Search by customer name</label>
         <input className="om-input" style={input} placeholder="e.g. Ramesh" value={search} onChange={(e) => setSearch(e.target.value)} />
         <div style={{ display: "flex", gap: 16, marginTop: 12, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 140 }}>
@@ -2615,17 +2661,38 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
         </div>
       </div>
 
-      <div style={{ ...sectionTitle, marginTop: 18 }}>
-        {filteredOrders.length} of {orders.length} order{orders.length === 1 ? "" : "s"} shown
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 18 }}>
+        <div style={{ ...sectionTitle, marginTop: 0, marginBottom: 0 }}>
+          {filteredOrders.length} of {orders.length} order{orders.length === 1 ? "" : "s"} shown
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {[["newest", "Newest first"], ["oldest", "Oldest first"]].map(([id, label]) => (
+            <button key={id} onClick={() => setDateOrder(id)} className="om-btn"
+              style={{ ...quickTagBtn, background: dateOrder === id ? C.moss : "transparent", color: dateOrder === id ? "#FAF6EE" : C.muted, borderColor: dateOrder === id ? C.moss : C.border }}>
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
+      <div style={{ height: 10 }} />
       {orders.length === 0 ? (
         <div style={emptyState}>No orders yet — add one from the New order tab.</div>
       ) : filteredOrders.length === 0 ? (
         <div style={emptyState}>No orders match your search/filters.</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {filteredOrders.map((o) =>
-            editingId === o.id ? (
+          {sortedOrders.map((o, idx) => {
+            const dayKey = tsToDateString(o.ts || 0);
+            const newDay = idx === 0 || tsToDateString(sortedOrders[idx - 1].ts || 0) !== dayKey;
+            return (
+            <React.Fragment key={o.id}>
+              {newDay && (
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: idx === 0 ? 0 : 10, paddingBottom: 4, borderBottom: `1px solid ${C.border}` }}>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: C.ember }}>{longDate(o.ts)}</span>
+                  <span style={{ fontSize: 12, color: C.muted }}>{ordersPerDay[dayKey]} order{ordersPerDay[dayKey] === 1 ? "" : "s"}</span>
+                </div>
+              )}
+              {editingId === o.id ? (
               <OrderEditForm key={o.id} order={o} menu={menu} partners={partners} deliveryZones={deliveryZones} onAddCredit={onAddCredit}
                 onSave={async (updated) => { const res = await onUpdate(updated); if (res.ok) setEditingId(null); return res; }}
                 onCancel={() => setEditingId(null)} />
@@ -2666,6 +2733,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={{ fontWeight: 600, fontSize: 15 }}>{o.customer}</div>
+                    <span style={{ fontSize: 12, color: C.muted }}>· {shortDate(o.ts)}</span>
                     {o.source === "online" && (
                       <span style={{ fontSize: 10, color: C.muted, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px" }}>Placed online</span>
                     )}
@@ -2798,8 +2866,10 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                 <button onClick={() => setEditingId(o.id)} style={{ ...iconBtn, marginRight: 6 }} className="om-btn" aria-label="Edit order"><Pencil size={14} /></button>
                 <ConfirmDelete label="order" onConfirm={() => onDelete(o.id)} />
               </div>
-            )
-          )}
+            )}
+            </React.Fragment>
+            );
+          })}
         </div>
       )}
     </div>
