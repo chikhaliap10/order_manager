@@ -28,7 +28,7 @@ export async function POST(req) {
     // needed for the manual button.
     if (resource === "sync-sheets") {
       const result = await syncAllToSheets({ getKey, getOrInitPartners });
-      const failures = ["Orders", "Expenses", "Withdrawals"].filter((tab) => result[tab] && result[tab].success === false);
+      const failures = ["Orders", "Expenses", "Withdrawals", "Credits", "Partners"].filter((tab) => result[tab] && result[tab].success === false);
       if (failures.length > 0) {
         const firstError = failures.map((tab) => result[tab].error).find(Boolean) || "Unknown error.";
         return badRequest(`Sheets sync failed for ${failures.join(", ")}: ${firstError}`);
@@ -259,9 +259,11 @@ export async function POST(req) {
         if (typeof payload.amount !== "number" || Number.isNaN(payload.amount)) return badRequest("A valid amount is required.");
         // settlementSetAt marks when it was agreed, so payouts recorded after
         // that count as paying this settlement (not as extra withdrawals).
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: payload.amount, settlementNote: payload.note || "", settlementSetAt: Date.now() } : p));
+        // settlementShared: whether the difference from the calculated balance is
+        // charged to the remaining partners. Off unless explicitly asked for.
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: payload.amount, settlementNote: payload.note || "", settlementSetAt: Date.now(), settlementShared: payload.shareDifference === true } : p));
       } else if (action === "clear-settlement") {
-        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: null, settlementNote: "", settlementSetAt: null } : p));
+        partners = partners.map((p) => (p.id === payload.id ? { ...p, settlementOverride: null, settlementNote: "", settlementSetAt: null, settlementShared: false } : p));
       }
       await setKey("partners", partners);
       return Response.json({ partners });

@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill, creditKey, groupCreditsByCustomer, overpaymentStatus, zelleCollectorOf, withZelleCollector } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -517,7 +517,7 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "history" && (
-          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} deliveryZones={deliveryZones}
+          <OrderHistoryTab menu={menu} orders={visibleOrders} partners={partners} deliveryZones={deliveryZones} credits={credits}
             onTogglePaid={(id) => act("order", "toggle-paid", { id })}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onRemovePayment={(id, paymentId) => act("order", "remove-payment", { id, paymentId })}
@@ -548,13 +548,13 @@ export default function HomePage() {
             onDelete={(id) => act("withdrawal", "delete", { id })}
             onSetInactive={(p, ts) => act("partners", "set-inactive", { id: p.id, inactiveSince: ts })}
             onReactivate={(p) => act("partners", "reactivate", { id: p.id })}
-            onSetSettlement={(p, amount, note) => act("partners", "set-settlement", { id: p.id, amount, note })}
+            onSetSettlement={(p, amount, note, shareDifference) => act("partners", "set-settlement", { id: p.id, amount, note, shareDifference })}
             onClearSettlement={(p) => act("partners", "clear-settlement", { id: p.id })}
             onAddPartner={(name, activeFrom) => act("partners", "add", { name, activeFrom })} />
         )}
         {tab === "settings" && (
           <SettingsTab menu={menu} partners={partners} deliveryZones={deliveryZones}
-            backupData={{ menu, partners, orders, expenses, withdrawals }}
+            backupData={{ menu, partners, orders, expenses, withdrawals, credits, deliveryZones }}
             onAddGroup={(name) => act("menu", "add-group", { name })}
             onRenameGroup={(groupId, name) => act("menu", "rename-group", { groupId, name })}
             onRemoveGroup={(groupId) => act("menu", "remove-group", { groupId })}
@@ -760,9 +760,9 @@ function firstVariant(item) { return item?.variants?.[0]; }
 function firstItem(group) { return group?.items?.[0]; }
 
 function creditBalanceFor(credits, customerName) {
-  const key = customerName.trim().toLowerCase();
+  const key = creditKey(customerName);
   if (!key) return 0;
-  return credits.filter((c) => c.customer.trim().toLowerCase() === key).reduce((s, c) => s + Number(c.amount || 0), 0);
+  return credits.filter((c) => creditKey(c.customer) === key).reduce((s, c) => s + Number(c.amount || 0), 0);
 }
 
 function CustomerNameAutocomplete({ value, onChange, pastNames, credits, placeholder }) {
@@ -926,7 +926,12 @@ function NewOrderTab({ menu, partners, credits, orders, deliveryZones, onCreate,
       // reconciliation as a direct reimbursement -- using credit toward a
       // new order still counts as "using it," so it comes off the Cash
       // total the same way handing cash back would.
-      await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", kind: "applied", note: "Applied to a new order" });
+      const cr = await onAddCredit({ customer: customer.trim(), amount: -creditToApply, method: "Cash", kind: "applied", note: "Applied to a new order" });
+      if (cr && !cr.ok) {
+        // The order saved but recording the credit as used failed -- say so,
+        // otherwise the credit would quietly keep showing as owed.
+        setError(`The order was saved, but the ${money(creditToApply)} credit wasn't marked as used. Use "Mark as used" on Summary > Customer credits.`);
+      }
     }
     setCustomer(""); setTip(""); setApplyCredit(false); setForPartner(false); setOrderDate(todayDateString()); setLines([makeLine()]); setDeliveryZoneId(""); setDeliveryFeeInput(""); setDiscountInput(""); setDiscountType("amount");
   };
@@ -1147,7 +1152,12 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onAddCred
   const [phone, setPhone] = useState(order.phone || "");
   const [lines, setLines] = useState(orderToLines(order, menu));
   const [tip, setTip] = useState(order.tip ? String(order.tip) : "");
-  const [collectedBy, setCollectedBy] = useState(order.collectedBy || "");
+  // Who holds the money. A partner meal's deduction is the order-level label; for
+  // anything else it's whoever received the Zelle payment(s) -- see zelleCollectorOf.
+  const isInternalOrder = order.paymentMethod === INTERNAL_METHOD;
+  const zelleCollector = isInternalOrder ? undefined : zelleCollectorOf(order);
+  const [collectedBy, setCollectedBy] = useState(isInternalOrder ? (order.collectedBy || "") : (zelleCollector ?? (order.collectedBy || "")));
+  const [collectorTouched, setCollectorTouched] = useState(false);
   const [orderDate, setOrderDate] = useState(tsToDateString(order.ts || Date.now()));
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -1265,6 +1275,9 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onAddCred
       }
     }
 
+    // Moving who received the Zelle changes the payment itself (that's what the
+    // balances read), not just a label -- and only when the dropdown was used.
+    if (!isInternalOrder && collectorTouched && zelleCollector !== undefined) payments = withZelleCollector(payments, collectedBy);
     const res = await onSave({
       ...order, customer: customer.trim(), phone: phone.trim(), items, tip: tipAmount, total: newTotal,
       discount: discountSaved,
@@ -1273,7 +1286,7 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onAddCred
         deliveryCutRate: feeSaved > 0 ? (isUberSave ? 1 : DRIVER_CUT_RATE) : 0, deliveryDriverId: driverSaved,
       }),
       ...(keepAsCredit ? { amountReceived: keepAsCredit.amountReceived } : {}),
-      payments, paid, collectedBy: paid ? collectedBy : "", ts: dateStringToTs(orderDate),
+      payments, paid, collectedBy: paid ? (isInternalOrder || collectorTouched ? collectedBy : (order.collectedBy || "")) : "", ts: dateStringToTs(orderDate),
     });
     if (res && res.ok && keepAsCredit && keepAsCredit.extra > 0.005 && onAddCredit) {
       await onAddCredit({ customer: customer.trim(), amount: keepAsCredit.extra, note: `Overpayment on order for ${customer.trim()}` });
@@ -1294,14 +1307,19 @@ function OrderEditForm({ order, menu, partners, deliveryZones, onSave, onAddCred
       <input className="om-input" style={input} value={customer} onChange={(e) => { setCustomer(e.target.value); setError(""); }} />
       <label style={{ ...fieldLabel, marginTop: 12 }}>Phone number (optional)</label>
       <input type="tel" className="om-input" style={input} value={phone} onChange={(e) => { setPhone(e.target.value); setError(""); }} />
-      {order.paid && (
-        <>
-          <label style={{ ...fieldLabel, marginTop: 12 }}>Collected by</label>
-          <select className="om-input" style={input} value={collectedBy} onChange={(e) => setCollectedBy(e.target.value)}>
-            <option value="">Shared account</option>
-            {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </>
+      {order.paid && (isInternalOrder || zelleCollector !== undefined) && (
+        zelleCollector === null ? (
+          <div style={{ marginTop: 12, fontSize: 12, color: C.muted }}>Different partners received different Zelle payments on this order, so it can't be changed here.</div>
+        ) : (
+          <>
+            <label style={{ ...fieldLabel, marginTop: 12 }}>{isInternalOrder ? "Collected by" : "Zelle received by"}</label>
+            <select className="om-input" style={input} value={collectedBy} onChange={(e) => { setCollectedBy(e.target.value); setCollectorTouched(true); }}>
+              <option value="">Shared account</option>
+              {partners.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            {!isInternalOrder && <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>This moves the Zelle between partners' balances. Cash is always in the shared drawer, so there's nothing to pick for it.</div>}
+          </>
+        )
       )}
       <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         {lines.map((l) => (
@@ -1869,6 +1887,40 @@ function CreditEditForm({ entry, onSave, onCancel }) {
   );
 }
 
+// Clears credit that was already used on an order but never got recorded as used
+// (it moves no money: no payment total changes and partner profit isn't touched).
+function CreditUsedForm({ balance, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState(balance.toFixed(2));
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittedRef = useRef(false);
+  const confirm = async () => {
+    if (submittedRef.current) return;
+    const amt = Number(amount);
+    if (!(amt > 0)) { setError("Enter an amount greater than 0."); return; }
+    if (amt > balance + 0.001) { setError(`Can't mark more than the ${money(balance)} owed as used.`); return; }
+    submittedRef.current = true;
+    setError(""); setSubmitting(true);
+    const res = await onConfirm(amt);
+    setSubmitting(false);
+    if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
+  };
+  return (
+    <div style={{ ...rowCard, flexDirection: "column", alignItems: "stretch", borderLeft: `3px solid ${C.moss}` }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Mark as used — {money(balance)} owed</div>
+      <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0 }} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+      <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>Use this when the credit was already taken off an order's bill. It just clears the balance -- no cash or Zelle total changes.</div>
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={15} /> : <Check size={15} />} {submitting ? "Saving..." : "Mark as used"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CreditReimburseForm({ balance, partners, onConfirm, onCancel }) {
   const [method, setMethod] = useState("Cash");
   const [paidBy, setPaidBy] = useState(""); // "" = the business paid it; otherwise a partner paid it from their own money
@@ -1925,15 +1977,9 @@ function CustomerCreditsPanel({ credits, partners, onUpdateCredit, onDeleteCredi
   const [expandedCustomer, setExpandedCustomer] = useState(null);
   const [editingEntryId, setEditingEntryId] = useState(null);
   const [reimbursingCustomer, setReimbursingCustomer] = useState(null);
+  const [usingCustomer, setUsingCustomer] = useState(null);
 
-  const byCustomer = {};
-  credits.forEach((c) => {
-    const key = c.customer.trim();
-    if (!byCustomer[key]) byCustomer[key] = { customer: key, entries: [], balance: 0 };
-    byCustomer[key].entries.push(c);
-    byCustomer[key].balance += Number(c.amount) || 0;
-  });
-  const customers = Object.values(byCustomer).filter((c) => Math.abs(c.balance) > 0.001 || c.entries.length > 0);
+  const customers = groupCreditsByCustomer(credits).filter((c) => Math.abs(c.balance) > 0.001 || c.entries.length > 0);
   if (customers.length === 0) return null;
 
   return (
@@ -1952,14 +1998,32 @@ function CustomerCreditsPanel({ credits, partners, onUpdateCredit, onDeleteCredi
                 {c.balance > 0 ? `${money(c.balance)} owed` : money(c.balance)}
               </div>
               {c.balance > 0.001 && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); setReimbursingCustomer(reimbursingCustomer === c.customer ? null : c.customer); }}
-                  className="om-btn" style={{ ...quickTagBtn, marginRight: 8 }}>
-                  Reimburse
-                </button>
+                <>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setUsingCustomer(usingCustomer === c.customer ? null : c.customer); setReimbursingCustomer(null); }}
+                    className="om-btn" style={{ ...quickTagBtn, marginRight: 6 }}>
+                    Mark as used
+                  </button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setReimbursingCustomer(reimbursingCustomer === c.customer ? null : c.customer); setUsingCustomer(null); }}
+                    className="om-btn" style={{ ...quickTagBtn, marginRight: 8 }}>
+                    Reimburse
+                  </button>
+                </>
               )}
               <span style={{ fontSize: 12, color: C.muted }}>{expandedCustomer === c.customer ? "hide" : "details"}</span>
             </div>
+            {usingCustomer === c.customer && (
+              <div style={{ marginTop: 6 }}>
+                <CreditUsedForm balance={c.balance}
+                  onConfirm={async (amt) => {
+                    const res = await onAddCredit({ customer: c.customer, amount: -amt, kind: "applied", note: "Marked as used on an order" });
+                    if (res.ok) setUsingCustomer(null);
+                    return res;
+                  }}
+                  onCancel={() => setUsingCustomer(null)} />
+              </div>
+            )}
             {reimbursingCustomer === c.customer && (
               <div style={{ marginTop: 6 }}>
                 <CreditReimburseForm balance={c.balance} partners={partners}
@@ -2413,7 +2477,7 @@ function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, to
   );
 }
 
-function OrderHistoryTab({ menu, orders, partners, deliveryZones, onTogglePaid, onAddPayment, onRemovePayment, onUpdate, onDelete, onAddCredit }) {
+function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTogglePaid, onAddPayment, onRemovePayment, onUpdate, onDelete, onAddCredit }) {
   const [editingId, setEditingId] = useState(null);
   const [pickingCollectorId, setPickingCollectorId] = useState(null);
   const [recordingAmountId, setRecordingAmountId] = useState(null);
@@ -2480,6 +2544,17 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, onTogglePaid, 
   };
 
   const partnerName = (id) => partners.find((p) => p.id === id)?.name;
+
+  // For the "Received $X ($Y owed to them)" note on an order: is that extra
+  // still owed, or has it since been paid back / used? That's their CURRENT
+  // credit balance, not something the order itself knows.
+  const creditBalanceByKey = {};
+  groupCreditsByCustomer(credits || []).forEach((g) => { creditBalanceByKey[g.key] = g.balance; });
+  const overpaidByKey = {};
+  orders.forEach((o) => {
+    const over = Number(o.amountReceived) > Number(o.total) ? Number(o.amountReceived) - Number(o.total) : 0;
+    if (over > 0) { const k = creditKey(o.customer); overpaidByKey[k] = (overpaidByKey[k] || 0) + over; }
+  });
 
   // Who personally collected any part of this order -- Zelle payments and
   // internal partner-meal deductions can be attributed to a specific
@@ -2656,11 +2731,22 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, onTogglePaid, 
                           Was this Zelle sent to a partner personally?
                         </button>
                       ) : null}
-                      <button onClick={() => setRecordingAmountId(o.id)} className="om-btn" style={quickTagBtn}>
-                        {o.amountReceived !== undefined && o.amountReceived > o.total
-                          ? `Received ${money(o.amountReceived)} (${money(o.amountReceived - o.total)} owed to them)`
-                          : "Paid more than the bill?"}
-                      </button>
+                      {(() => {
+                        const hasOver = o.amountReceived !== undefined && o.amountReceived > o.total;
+                        const key = creditKey(o.customer);
+                        const st = hasOver ? overpaymentStatus(creditBalanceByKey[key], overpaidByKey[key]) : null;
+                        const over = hasOver ? o.amountReceived - o.total : 0;
+                        const label = !hasOver ? "Paid more than the bill?"
+                          : st.state === "settled" ? `Received ${money(o.amountReceived)} (${money(over)} over — settled)`
+                          : st.state === "partly" ? `Received ${money(o.amountReceived)} (${money(over)} over — ${money(st.stillOwed)} still owed to them)`
+                          : `Received ${money(o.amountReceived)} (${money(over)} owed to them)`;
+                        return (
+                          <button onClick={() => setRecordingAmountId(o.id)} className="om-btn"
+                            style={hasOver && st.state === "settled" ? { ...quickTagBtn, borderColor: C.moss, color: C.moss } : quickTagBtn}>
+                            {label}
+                          </button>
+                        );
+                      })()}
                     </div>
                     );
                   })()}
@@ -3068,6 +3154,7 @@ function InactiveDateForm({ partner, onConfirm, onCancel }) {
 function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
   const [amount, setAmount] = useState(partner.settlementOverride != null ? String(partner.settlementOverride) : "");
   const [note, setNote] = useState(partner.settlementNote || "");
+  const [share, setShare] = useState(partner.settlementShared === true);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -3075,7 +3162,7 @@ function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
     if (amount === "" || Number.isNaN(Number(amount))) { setError("Enter an amount."); return; }
     setError("");
     setSubmitting(true);
-    const res = await onConfirm(Number(amount), note);
+    const res = await onConfirm(Number(amount), note, share);
     setSubmitting(false);
     if (res && !res.ok) setError(res.error);
   };
@@ -3087,6 +3174,12 @@ function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
       </div>
       <input type="number" step="0.01" className="om-input" style={{ ...input, marginTop: 0 }} placeholder="e.g. 505.00" value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
       <input className="om-input" style={{ ...input, marginTop: 8 }} placeholder="Note (optional) -- e.g. 'Agreed flat settlement'" value={note} onChange={(e) => setNote(e.target.value)} />
+      <label style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 10, cursor: "pointer" }}>
+        <input type="checkbox" checked={share} onChange={(e) => setShare(e.target.checked)} style={{ marginTop: 3 }} />
+        <span style={{ fontSize: 12 }}>Share any difference with the remaining partners
+          <span style={{ display: "block", color: C.muted }}>Off (default): only this partner is affected, nobody else's balance changes. On: if the amount differs from the calculated balance, the difference is split equally between everyone else.</span>
+        </span>
+      </label>
       <ErrorText>{error}</ErrorText>
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
         <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted, padding: "6px 10px", fontSize: 12 }} className="om-btn">Cancel</button>
@@ -3192,7 +3285,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                   {p.settlementNote && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{p.settlementNote}</div>}
                   <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>
                     {Math.abs(sInfo.delta) > 0.004
-                      ? `${money(Math.abs(sInfo.delta))} ${sInfo.delta > 0 ? "more" : "less"} than calculated -- ${sInfo.bearerCount > 0 ? `shared equally by the ${sInfo.bearerCount} remaining partner${sInfo.bearerCount === 1 ? "" : "s"}` : "no remaining partners to share it"}.`
+                      ? `${money(Math.abs(sInfo.delta))} ${sInfo.delta > 0 ? "more" : "less"} than calculated -- ${!sInfo.shared ? "not charged to the other partners" : sInfo.bearerCount > 0 ? `shared equally by the ${sInfo.bearerCount} remaining partner${sInfo.bearerCount === 1 ? "" : "s"}` : "no remaining partners to share it"}.`
                       : "Same as the calculated balance."}
                   </div>
                   {sInfo.paidSince > 0 && (
@@ -3223,7 +3316,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
               )}
               {editingSettlementFor === p.id && (
                 <SettlementOverrideForm partner={p}
-                  onConfirm={async (amt, note) => { const res = await onSetSettlement(p, amt, note); if (res.ok) setEditingSettlementFor(null); return res; }}
+                  onConfirm={async (amt, note, share) => { const res = await onSetSettlement(p, amt, note, share); if (res.ok) setEditingSettlementFor(null); return res; }}
                   onCancel={() => setEditingSettlementFor(null)} />
               )}
             </div>
@@ -3565,7 +3658,7 @@ function SyncSheetsButton({ onSync }) {
       setMessage(res.error || "Sync failed.");
     } else {
       setStatus("success");
-      const counts = ["Orders", "Expenses", "Withdrawals"]
+      const counts = ["Orders", "Expenses", "Withdrawals", "Credits", "Partners"]
         .map((tab) => (res?.[tab]?.rowsWritten !== undefined ? `${res[tab].rowsWritten} ${tab.toLowerCase()}` : null))
         .filter(Boolean)
         .join(", ");
