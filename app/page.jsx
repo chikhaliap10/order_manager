@@ -1,7 +1,7 @@
 "use client";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { Plus, Trash2, Check, X, Lock, Receipt, History, Wallet, Users, Settings2, ChefHat, Loader2, Download, ShieldCheck, Pencil, Inbox, BarChart3, ClipboardList } from "lucide-react";
-import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill, creditKey, groupCreditsByCustomer, overpaymentStatus, zelleCollectorOf, withZelleCollector, sortOrdersByDate } from "../lib/defaults";
+import { PAYMENT_METHODS, INTERNAL_METHOD, effectivePayments, paymentsTotal, discountAmountFor, isActiveNow, isReimbursement, computeSettlementAdjustments, computePaymentTypeTotals, auditTotals, orderMoneySummary, DELIVERY_COURIER, DRIVER_CUT_RATE, driverCutRate, findDeliveryDriver, orderTotalFromParts, creditFromLoweredBill, creditKey, groupCreditsByCustomer, overpaymentStatus, heldCashByPartner, zelleCollectorOf, withZelleCollector, sortOrdersByDate } from "../lib/defaults";
 
 const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -175,6 +175,7 @@ export default function HomePage() {
   const [expenses, setExpenses] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [credits, setCredits] = useState([]);
+  const [handbacks, setHandbacks] = useState([]);
   const [deliveryZones, setDeliveryZones] = useState([]);
   const [tab, setTab] = useState("orders");
 
@@ -185,7 +186,7 @@ export default function HomePage() {
       if (data.authed) {
         setUnlocked(true);
         setMenu(data.menu); setPartners(data.partners); setOrders(data.orders);
-        setExpenses(data.expenses); setWithdrawals(data.withdrawals); setCredits(data.credits || []);
+        setExpenses(data.expenses); setWithdrawals(data.withdrawals); setCredits(data.credits || []); setHandbacks(data.handbacks || []);
         setDeliveryZones(data.deliveryZones || []);
       } else {
         setUnlocked(false);
@@ -249,6 +250,7 @@ export default function HomePage() {
       if (res.menu) setMenu(res.menu);
       if (res.partners) setPartners(res.partners);
       if (res.credits) setCredits(res.credits);
+      if (res.handbacks) setHandbacks(res.handbacks);
       if (res.deliveryZones) setDeliveryZones(res.deliveryZones);
       // Spread the rest of the response through too (e.g. sync-sheets'
       // per-tab results) -- purely additive, every existing caller only
@@ -395,7 +397,7 @@ export default function HomePage() {
         .filter((o) => o.paid && o.collectedBy === p.id && o.paymentMethod === INTERNAL_METHOD)
         .reduce((s, o) => s + o.total, 0);
       const zelleReceivedPersonally = visibleOrders.reduce(
-        (s, o) => s + effectivePayments(o).filter((pay) => pay.method === "Zelle" && pay.collectedBy === p.id).reduce((s2, pay) => s2 + (Number(pay.amount) || 0), 0),
+        (s, o) => s + effectivePayments(o).filter((pay) => (pay.method === "Zelle" || pay.method === "Cash") && pay.collectedBy === p.id).reduce((s2, pay) => s2 + (Number(pay.amount) || 0), 0),
         0
       );
       collectedByPartner[p.id] = internalDeduction + zelleReceivedPersonally;
@@ -414,8 +416,9 @@ export default function HomePage() {
       computeSettlementAdjustments(partners, baseBalance, withdrawals);
     const expensePercent = income > 0 ? (expenseTotal / income) * 100 : 0;
     const profitPercent = income > 0 ? (netProfit / income) * 100 : 0;
-    return { income, pending, expenseTotal, netProfit, totalReimbursed, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, refundsPaidByPartner, settlementAdjustmentByPartner, settlementInfo, expensePercent, profitPercent };
-  }, [visibleOrders, expenses, withdrawals, partners, credits]);
+    const heldByPartner = heldCashByPartner(visibleOrders, handbacks);
+    return { heldByPartner, income, pending, expenseTotal, netProfit, totalReimbursed, share, perPartnerShare, withdrawnByPartner, collectedByPartner, paidExpensesByPartner, deliveryEarningsByPartner, refundsPaidByPartner, settlementAdjustmentByPartner, settlementInfo, expensePercent, profitPercent };
+  }, [visibleOrders, expenses, withdrawals, partners, credits, handbacks]);
 
   const GlobalStyle = () => (
     <style>{`
@@ -537,7 +540,7 @@ export default function HomePage() {
             onAddCredit={(entry) => act("credits", "create", entry)} />
         )}
         {tab === "summary" && (
-          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} withdrawals={withdrawals} expenses={expenses} totals={totals}
+          <SummaryTab menu={menu} orders={visibleOrders} partners={partners} credits={credits} withdrawals={withdrawals} expenses={expenses} handbacks={handbacks} totals={totals}
             onAddPayment={(id, payments) => act("order", "add-payment", { id, payments })}
             onAddCredit={(entry) => act("credits", "create", entry)}
             onUpdateCredit={(entry) => act("credits", "update", entry)}
@@ -553,7 +556,9 @@ export default function HomePage() {
             onDelete={(id) => act("expense", "delete", { id })} />
         )}
         {tab === "partners" && (
-          <PartnersTab partners={partners} totals={totals} withdrawals={withdrawals}
+          <PartnersTab partners={partners} totals={totals} withdrawals={withdrawals} handbacks={handbacks}
+            onHandback={(h) => act("handback", "create", h)}
+            onDeleteHandback={(id) => act("handback", "delete", { id })}
             onCreate={(w) => act("withdrawal", "create", w)}
             onUpdate={(w) => act("withdrawal", "update", w)}
             onDelete={(id) => act("withdrawal", "delete", { id })}
@@ -565,7 +570,7 @@ export default function HomePage() {
         )}
         {tab === "settings" && (
           <SettingsTab menu={menu} partners={partners} deliveryZones={deliveryZones}
-            backupData={{ menu, partners, orders, expenses, withdrawals, credits, deliveryZones }}
+            backupData={{ menu, partners, orders, expenses, withdrawals, credits, deliveryZones, handbacks }}
             onAddGroup={(name) => act("menu", "add-group", { name })}
             onRenameGroup={(groupId, name) => act("menu", "rename-group", { groupId, name })}
             onRemoveGroup={(groupId) => act("menu", "remove-group", { groupId })}
@@ -1771,7 +1776,8 @@ function trimPayments(payments, amountToRemove) {
 function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
   const alreadyPaid = paymentsTotal(order);
   const remaining = Math.max(0, order.total - alreadyPaid);
-  const [rows, setRows] = useState([{ method: "Cash", amount: remaining > 0 ? String(remaining) : "", collectedBy: "" }]);
+  const [rows, setRows] = useState([{ method: "Cash", amount: remaining > 0 ? String(remaining) : "", collectedBy: "", heldBy: "" }]);
+  const leftPartners = partners.filter((p) => p.inactiveSince);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const submittedRef = useRef(false);
@@ -1785,7 +1791,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
   const overLimit = rowsTotal > remaining + 0.001;
 
   const updateRow = (i, patch) => setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  const addRow = () => setRows([...rows, { method: "Zelle", amount: "", collectedBy: "" }]);
+  const addRow = () => setRows([...rows, { method: "Zelle", amount: "", collectedBy: "", heldBy: "" }]);
   const removeRow = (i) => setRows(rows.filter((_, idx) => idx !== i));
 
   const confirm = async () => {
@@ -1804,7 +1810,7 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
     // Zelle goes to whichever specific phone/email the customer sent it
     // to, which could be a partner's personal account, so that's the one
     // that needs a collector.
-    const res = await onConfirm(cleaned.map((r) => ({ method: r.method, amount: Number(r.amount), collectedBy: r.method === "Zelle" ? r.collectedBy : "" })));
+    const res = await onConfirm(cleaned.map((r) => ({ method: r.method, amount: Number(r.amount), collectedBy: (r.method === "Zelle" || r.method === "Cash") && !r.heldBy ? r.collectedBy : "", heldBy: r.heldBy || "" })));
     setSubmitting(false);
     if (res && !res.ok) { setError(res.error); submittedRef.current = false; }
   };
@@ -1823,11 +1829,18 @@ function PaymentRecorder({ order, partners, onConfirm, onCancel }) {
             </select>
             <input type="number" step="0.01" min="0" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 100px" }}
               placeholder="Amount" value={r.amount} onChange={(e) => updateRow(i, { amount: e.target.value })} />
-            {r.method === "Zelle" && (
+            {(r.method === "Zelle" || r.method === "Cash") && !r.heldBy && (
               <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
                 value={r.collectedBy} onChange={(e) => updateRow(i, { collectedBy: e.target.value })}>
-                <option value="">Zelle → shared account</option>
-                {partners.filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>Zelle → {p.name} personally</option>)}
+                <option value="">{r.method} → {r.method === "Cash" ? "shared drawer" : "shared account"}</option>
+                {partners.filter((p) => isActiveNow(p)).map((p) => <option key={p.id} value={p.id}>{r.method} → {p.name} personally</option>)}
+              </select>
+            )}
+            {leftPartners.length > 0 && (
+              <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 150px", fontSize: 12 }}
+                value={r.heldBy} onChange={(e) => updateRow(i, { heldBy: e.target.value })}>
+                <option value="">Money is with the business</option>
+                {leftPartners.map((p) => <option key={p.id} value={p.id}>Collected by {p.name} (left) - to hand back</option>)}
               </select>
             )}
             {rows.length > 1 && (
@@ -2077,8 +2090,8 @@ function CustomerCreditsPanel({ credits, partners, onUpdateCredit, onDeleteCredi
   );
 }
 
-function PaymentTypeTotals({ orders, credits, withdrawals, expenses }) {
-  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses);
+function PaymentTypeTotals({ orders, credits, withdrawals, expenses, handbacks }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses, handbacks);
   if (rows.length === 0) return null;
   return (
     <div style={{ ...card, marginBottom: 18 }}>
@@ -2234,8 +2247,8 @@ function DailyBarChart({ orders }) {
 
 const METHOD_COLORS = { Cash: "#43966B", Zelle: "#F0A868", "Debit Card": "#F0C24B", "Credit Card": "#F0796B" };
 
-function MethodBarChart({ orders, credits, withdrawals, expenses }) {
-  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses).filter((r) => !r.internal && r.total > 0);
+function MethodBarChart({ orders, credits, withdrawals, expenses, handbacks }) {
+  const rows = computePaymentTypeTotals(orders, credits, withdrawals, expenses, handbacks).filter((r) => !r.internal && r.total > 0);
   if (rows.length === 0) return null;
   const max = Math.max(...rows.map((r) => r.total), 1);
   return (
@@ -2422,9 +2435,9 @@ function PlateTotalsTab({ orders, menu }) {
 // auditTotals in lib/defaults.js). Anything that doesn't reconcile is shown
 // right here with exactly which records are involved, so a wrong number gets
 // caught on the screen instead of at the cash drawer.
-function TotalsCheckCard({ orders, expenses, withdrawals, credits, partners, totals }) {
+function TotalsCheckCard({ orders, expenses, withdrawals, credits, partners, totals, handbacks }) {
   const [showPassed, setShowPassed] = useState(false);
-  const { checks, worst } = auditTotals({ orders, expenses, withdrawals, credits, partners, totals });
+  const { checks, worst } = auditTotals({ orders, expenses, withdrawals, credits, partners, totals, handbacks });
   const problems = checks.filter((c) => c.status !== "ok");
   const passed = checks.filter((c) => c.status === "ok");
   const colorOf = (st) => (st === "error" ? C.danger : st === "warn" ? C.warning : C.moss);
@@ -2469,18 +2482,18 @@ function TotalsCheckCard({ orders, expenses, withdrawals, credits, partners, tot
   );
 }
 
-function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
+function SummaryTab({ menu, orders, partners, credits, withdrawals, expenses, handbacks, totals, onAddPayment, onAddCredit, onUpdateCredit, onDeleteCredit }) {
   return (
     <div>
       <KpiCards orders={orders} totals={totals} />
-      <TotalsCheckCard orders={orders} expenses={expenses} withdrawals={withdrawals} credits={credits} partners={partners} totals={totals} />
+      <TotalsCheckCard orders={orders} expenses={expenses} withdrawals={withdrawals} credits={credits} partners={partners} totals={totals} handbacks={handbacks} />
       <DailyBarChart orders={orders} />
       <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-        <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
+        <MethodBarChart orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} handbacks={handbacks} />
         <CategoryBarChart orders={orders} menu={menu} />
       </div>
       <PaymentGapReconciler orders={orders} onAddPayment={onAddPayment} />
-      <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} />
+      <PaymentTypeTotals orders={orders} credits={credits} withdrawals={withdrawals} expenses={expenses} handbacks={handbacks} />
       <DailyBreakdown orders={orders} />
       <SalesBreakdown orders={orders} menu={menu} />
       <CustomerCreditsPanel credits={credits} partners={partners} onUpdateCredit={onUpdateCredit} onDeleteCredit={onDeleteCredit} onAddCredit={onAddCredit} />
@@ -2521,7 +2534,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
       // had a collector to begin with. Also written back as `payments` so
       // an old order still on the legacy single collectedBy shape gets
       // upgraded to the new per-payment shape at the same time.
-      const payments = effectivePayments(order).map((p) => (p.method === "Zelle" ? { ...p, collectedBy: "" } : p));
+      const payments = effectivePayments(order).map((p) => ((p.method === "Zelle" || p.method === "Cash") ? { ...p, collectedBy: "" } : p));
       await onUpdate({ ...order, payments, collectedBy: "" });
     }
     setReturningId(null);
@@ -2579,7 +2592,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
   // A split payment could in principle have more than one collector, so
   // this returns every distinct one, not just the first.
   const orderCollectors = (o) =>
-    [...new Set(effectivePayments(o).filter((p) => (p.method === "Zelle" || p.method === INTERNAL_METHOD) && p.collectedBy).map((p) => p.collectedBy))];
+    [...new Set(effectivePayments(o).filter((p) => (p.method === "Zelle" || p.method === "Cash" || p.method === INTERNAL_METHOD) && p.collectedBy).map((p) => p.collectedBy))];
 
   const datedOrders = filterOrdersByPeriod(orders, datePeriod, { from: dateFrom, to: dateTo });
   const filteredOrders = datedOrders.filter((o) => {
@@ -2759,7 +2772,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                     // whole point of it) -- Cash always lands in the
                     // shared drawer, and Debit/Credit go straight to the
                     // shared merchant account, so neither is attributable.
-                    const attributable = payments.filter((p) => p.method === "Zelle" || p.method === INTERNAL_METHOD);
+                    const attributable = payments.filter((p) => p.method === "Zelle" || p.method === INTERNAL_METHOD || (p.method === "Cash" && p.collectedBy));
                     const collected = attributable.filter((p) => p.collectedBy);
                     return (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
@@ -2768,7 +2781,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                           value={o.paymentMethod || "Cash"}
                           onChange={(e) => {
                             const method = e.target.value;
-                            const updatedPayments = payments.length === 1 ? [{ ...payments[0], method, collectedBy: method === "Zelle" ? payments[0].collectedBy : "" }] : payments;
+                            const updatedPayments = payments.length === 1 ? [{ ...payments[0], method, collectedBy: (method === "Zelle" || method === "Cash") ? payments[0].collectedBy : "" }] : payments;
                             onUpdate({ ...o, paymentMethod: method, payments: updatedPayments });
                           }}>
                           {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
@@ -2784,7 +2797,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                       {collected.length > 0 ? (
                         <>
                           <span style={{ fontSize: 12, color: C.ember }}>
-                            {o.paymentMethod === INTERNAL_METHOD ? "Collected by " : "Zelle received by "}
+                            {o.paymentMethod === INTERNAL_METHOD ? "Collected by " : "Received personally by "}
                             {[...new Set(collected.map((p) => partnerName(p.collectedBy) || "Unknown"))].join(", ")}
                           </span>
                           {o.paymentMethod !== INTERNAL_METHOD && (
@@ -2844,6 +2857,7 @@ function OrderHistoryTab({ menu, orders, partners, deliveryZones, credits, onTog
                                 {p.method} <span style={{ ...displayNum, fontSize: 13 }}>{money(p.amount)}</span>
                                 <span style={{ color: C.muted, fontSize: 11 }}> · logged {p.ts ? tsToDateString(p.ts) : "—"}</span>
                                 {p.collectedBy ? <span style={{ color: C.ember, fontSize: 11 }}> · received by {partnerName(p.collectedBy) || "Unknown"}</span> : null}
+                                {p.heldBy ? <span style={{ color: C.ember, fontSize: 11 }}> · held by {partnerName(p.heldBy) || "Unknown"} (to hand back)</span> : null}
                               </span>
                               <ConfirmDelete label="payment" onConfirm={() => onRemovePayment(o.id, p.id)} />
                             </div>
@@ -3221,6 +3235,41 @@ function InactiveDateForm({ partner, onConfirm, onCancel }) {
   );
 }
 
+function HandbackForm({ partner, holding, onConfirm, onCancel }) {
+  const [amount, setAmount] = useState(String(holding));
+  const [method, setMethod] = useState("Cash");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const confirm = async () => {
+    if (!(Number(amount) > 0)) { setError("Enter an amount."); return; }
+    if (Number(amount) > holding + 0.01) { setError(`${partner.name} is only holding ${money(holding)}.`); return; }
+    setError(""); setSubmitting(true);
+    const res = await onConfirm({ amount: Number(amount), method, note });
+    setSubmitting(false);
+    if (res && !res.ok) setError(res.error);
+  };
+  return (
+    <div style={{ marginTop: 10, padding: 10, borderRadius: 10, background: C.paper, border: `1px solid ${C.border}` }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>How much did {partner.name} just hand back? (Part now, the rest later is fine.)</div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input type="number" step="0.01" min="0.01" className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 90px" }} value={amount} onChange={(e) => { setAmount(e.target.value); setError(""); }} />
+        <select className="om-input" style={{ ...input, marginTop: 0, flex: "1 1 110px" }} value={method} onChange={(e) => setMethod(e.target.value)}>
+          {PAYMENT_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </div>
+      <input className="om-input" style={{ ...input, marginTop: 8 }} placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+      <ErrorText>{error}</ErrorText>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}>
+        <button onClick={onCancel} disabled={submitting} style={{ ...ghostBtn, marginTop: 0, borderColor: C.border, color: C.muted, padding: "6px 10px", fontSize: 12 }} className="om-btn">Cancel</button>
+        <button onClick={confirm} disabled={submitting} style={{ ...primaryBtn, width: "auto", marginTop: 0, padding: "6px 12px", fontSize: 12, opacity: submitting ? 0.7 : 1 }} className="om-btn">
+          {submitting ? <Loader2 className="om-spin" size={13} /> : <Check size={13} />} Save
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
   const [amount, setAmount] = useState(partner.settlementOverride != null ? String(partner.settlementOverride) : "");
   const [note, setNote] = useState(partner.settlementNote || "");
@@ -3261,7 +3310,7 @@ function SettlementOverrideForm({ partner, onConfirm, onCancel }) {
   );
 }
 
-function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDelete, onSetInactive, onReactivate, onSetSettlement, onClearSettlement, onAddPartner }) {
+function PartnersTab({ partners, totals, withdrawals, handbacks, onHandback, onDeleteHandback, onCreate, onUpdate, onDelete, onSetInactive, onReactivate, onSetSettlement, onClearSettlement, onAddPartner }) {
   const [partnerId, setPartnerId] = useState(partners[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -3269,6 +3318,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editingActiveDateFor, setEditingActiveDateFor] = useState(null);
+  const [handbackFor, setHandbackFor] = useState(null);
   const [editingSettlementFor, setEditingSettlementFor] = useState(null);
   const [withdrawMethod, setWithdrawMethod] = useState("Cash");
   useEffect(() => { if (!partnerId && partners[0]) setPartnerId(partners[0].id); }, [partners]);
@@ -3302,6 +3352,8 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
           const sInfo = totals.settlementInfo[p.id]; // only set for a partner with a negotiated settlement
           const balance = myShare - withdrawn - collected + paidPersonally + deliveryEarnings + refundsPaid + settlementAdj;
           const isInactive = Boolean(p.inactiveSince);
+          const held = (totals.heldByPartner || {})[p.id] || { collected: 0, returned: 0, holding: 0 };
+          const handbackList = (handbacks || []).filter((h) => h.partnerId === p.id);
           return (
             <div key={p.id} style={{ ...statCard, borderTop: `3px solid ${isInactive ? C.muted : C.ember}`, textAlign: "left", opacity: isInactive ? 0.75 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -3318,7 +3370,7 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
               <div style={{ ...displayNum, fontSize: 16, marginBottom: 8 }}>{money(withdrawn)}</div>
               {collected > 0 && (
                 <>
-                  <div style={statLabel}>Cash collected (not yet returned)</div>
+                  <div style={statLabel}>Collected personally (not yet returned)</div>
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: C.danger }}>-{money(collected)}</div>
                 </>
               )}
@@ -3345,6 +3397,27 @@ function PartnersTab({ partners, totals, withdrawals, onCreate, onUpdate, onDele
                   <div style={statLabel}>Share of a partner's settlement</div>
                   <div style={{ ...displayNum, fontSize: 16, marginBottom: 8, color: settlementAdj < 0 ? C.danger : C.success }}>{settlementAdj < 0 ? "-" : "+"}{money(Math.abs(settlementAdj))}</div>
                 </>
+              )}
+              {(held.collected > 0 || held.returned > 0) && (
+                <div style={{ margin: "4px 0 10px", padding: 10, borderRadius: 10, background: C.paper, border: `1px dashed ${C.ember}` }}>
+                  <div style={statLabel}>Holding for the business (to hand back)</div>
+                  <div style={{ ...displayNum, fontSize: 18, color: held.holding > 0.005 ? C.ember : C.moss }}>{money(held.holding)}</div>
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Collected {money(held.collected)} · handed back {money(held.returned)}. Doesn't change their balance.</div>
+                  {handbackList.map((h) => (
+                    <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 4 }}>
+                      <span style={{ flex: 1 }}>Handed back {money(h.amount)} ({h.method}) · {tsToDateString(h.ts)}{h.note ? ` · ${h.note}` : ""}</span>
+                      <ConfirmDelete label="handback" onConfirm={() => onDeleteHandback(h.id)} />
+                    </div>
+                  ))}
+                  {held.holding > 0.005 && (
+                    <button onClick={() => setHandbackFor(handbackFor === p.id ? null : p.id)} className="om-btn" style={{ ...quickTagBtn, marginTop: 8 }}>Handed back</button>
+                  )}
+                  {handbackFor === p.id && (
+                    <HandbackForm partner={p} holding={held.holding}
+                      onConfirm={async (data) => { const res = await onHandback({ partnerId: p.id, ...data }); if (res.ok) setHandbackFor(null); return res; }}
+                      onCancel={() => setHandbackFor(null)} />
+                  )}
+                </div>
               )}
               <div style={statLabel}>Current balance {p.settlementOverride != null ? "(calculated)" : ""}</div>
               <div style={{ ...displayNum, fontSize: p.settlementOverride != null ? 15 : 21, color: p.settlementOverride != null ? C.muted : C.ember, textDecoration: p.settlementOverride != null ? "line-through" : "none" }}>{money(sInfo ? sInfo.beforePayout : balance)}</div>

@@ -1,6 +1,6 @@
 import { getKey, setKey, getOrInitMenu, getOrInitPartners, getOrInitDeliveryZones } from "../../../lib/kv";
 import { isAuthed } from "../../../lib/auth";
-import { uid, defaultMenu, defaultDeliveryZones, paymentsTotal } from "../../../lib/defaults";
+import { uid, defaultMenu, defaultDeliveryZones, paymentsTotal, heldCashByPartner } from "../../../lib/defaults";
 import { syncAllToSheets } from "../../../lib/sheets";
 
 export const dynamic = "force-dynamic";
@@ -95,6 +95,11 @@ export async function POST(req) {
         // more than the bill?" instead, which records it deliberately.
         const owed = Math.max(Number(order.total) || 0, Number(order.amountReceived) || 0);
         const alreadyLogged = paymentsTotal(order);
+        const heldIds = [...new Set(payload.payments.map((p) => p.heldBy).filter(Boolean))];
+        if (heldIds.length) {
+          const known = await getOrInitPartners();
+          if (heldIds.some((id) => !known.some((q) => q.id === id))) return badRequest("That partner doesn't exist.");
+        }
         const incoming = payload.payments.reduce((s, p) => s + Number(p.amount), 0);
         if (alreadyLogged + incoming > owed + 0.01) {
           const remaining = Math.max(0, owed - alreadyLogged);
@@ -107,7 +112,9 @@ export async function POST(req) {
         orders = orders.map((o) => {
           if (o.id !== payload.id) return o;
           const existing = Array.isArray(o.payments) ? o.payments : [];
-          const added = payload.payments.map((p) => ({ id: uid(), method: p.method, amount: Number(p.amount), collectedBy: p.method === "Zelle" ? (p.collectedBy || "") : "", ts: Date.now() }));
+          // heldBy: a LEFT partner collected this and will hand it back. Mutually
+          // exclusive with collectedBy (which deducts from an active partner's balance).
+          const added = payload.payments.map((p) => ({ id: uid(), method: p.method, amount: Number(p.amount), collectedBy: (p.method === "Zelle" || p.method === "Cash") && !p.heldBy ? (p.collectedBy || "") : "", ...(p.heldBy ? { heldBy: p.heldBy } : {}), ts: Date.now() }));
           const payments = [...existing, ...added];
           const totalPaid = payments.reduce((s, p) => s + p.amount, 0);
           // Once the payments logged cover the full order total, the order
@@ -185,6 +192,27 @@ export async function POST(req) {
       }
       await setKey("withdrawals", withdrawals);
       return Response.json({ withdrawals });
+    }
+
+    // ---------- HANDBACKS (cash a former partner returns) ----------
+    if (resource === "handback") {
+      let handbacks = await getKey("handbacks", []);
+      if (action === "create") {
+        const partners = await getOrInitPartners();
+        const orders = await getKey("orders", []);
+        if (!partners.some((p) => p.id === payload?.partnerId)) return badRequest("Choose a partner.");
+        const amount = Number(payload.amount);
+        if (!(amount > 0)) return badRequest("Enter an amount greater than 0.");
+        if (!["Cash", "Zelle", "Debit Card", "Credit Card"].includes(payload.method || "Cash")) return badRequest("Unknown method.");
+        const mine = heldCashByPartner(orders, handbacks)[payload.partnerId];
+        const holding = mine ? mine.holding : 0;
+        if (amount > holding + 0.01) return badRequest(`They are only holding $${Math.max(0, holding).toFixed(2)} -- $${amount.toFixed(2)} is too much.`);
+        handbacks = [{ id: uid(), partnerId: payload.partnerId, amount, method: payload.method || "Cash", note: String(payload.note || "").slice(0, 200), ts: payload.ts || Date.now() }, ...handbacks];
+      } else if (action === "delete") {
+        handbacks = handbacks.filter((h) => h.id !== payload.id);
+      }
+      await setKey("handbacks", handbacks);
+      return Response.json({ handbacks });
     }
 
     // ---------- MENU ----------
